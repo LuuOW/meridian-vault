@@ -41,6 +41,10 @@ const fetchJSON = async (url, opts = {}) => {
 }
 
 async function refreshAuth() {
+  // Lock screen is the safe default render — show it before fetching status,
+  // so even if /auth/status fails the user has a usable lock UI.
+  try { lock.hidden = false; vault.hidden = true } catch {}
+
   try {
     const s = await fetchJSON('/auth/status')
     if (s.authed) {
@@ -59,6 +63,8 @@ async function refreshAuth() {
   } catch (e) {
     authBadge.textContent = 'offline'
     authBadge.className   = 'badge badge-warn'
+    // Even on /auth/status failure, keep the lock screen visible.
+    lock.hidden = false; vault.hidden = true
   }
 }
 
