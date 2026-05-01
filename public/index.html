@@ -1,0 +1,96 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="theme-color" content="#0a0d14">
+<title>Meridian Vault</title>
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+<header class="vh">
+  <h1>◎ Meridian Vault</h1>
+  <span class="vh-sub">vault.ask-meridian.uk</span>
+  <span id="authBadge" class="badge badge-muted">checking…</span>
+</header>
+
+<!-- Lock screen -->
+<section id="lock" class="card lock-card" hidden>
+  <div class="lock-icon">🔒</div>
+  <h2>Unlock vault</h2>
+  <p class="lead">Use a passkey, or paste the bootstrap token.</p>
+
+  <button id="passkeyAuthBtn" class="btn btn-primary">Unlock with passkey</button>
+  <div class="divider"><span>or</span></div>
+
+  <form id="tokenForm">
+    <label>Bootstrap token
+      <input id="tokenInput" type="password" placeholder="vault_…" autocomplete="off" required>
+    </label>
+    <button type="submit" class="btn btn-ghost">Unlock with token</button>
+  </form>
+  <p id="lockErr" class="err" hidden></p>
+</section>
+
+<!-- Authed view -->
+<main id="vault" class="vault-grid" hidden>
+  <section class="card">
+    <header class="card-head">
+      <h2>Secrets</h2>
+      <button id="newBtn" class="btn-ghost btn-sm">+ new</button>
+    </header>
+    <ul id="secretsList" class="secrets-list">
+      <li class="empty">Loading…</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <header class="card-head">
+      <h2>Passkeys</h2>
+      <button id="enrollBtn" class="btn-ghost btn-sm">+ enroll passkey</button>
+    </header>
+    <ul id="passkeysList" class="passkeys-list">
+      <li class="empty">Loading…</li>
+    </ul>
+
+    <header class="card-head" style="margin-top:18px">
+      <h2>Session</h2>
+    </header>
+    <button id="logoutBtn" class="btn-ghost">Log out</button>
+  </section>
+</main>
+
+<!-- Edit dialog -->
+<dialog id="editDialog" class="dlg">
+  <form method="dialog" id="editForm">
+    <h3 id="editTitle">New secret</h3>
+    <label>Key
+      <input id="editKey" type="text" pattern="[A-Z][A-Z0-9_]{0,63}" required placeholder="MY_API_KEY">
+    </label>
+    <label>Value
+      <textarea id="editValue" rows="4" maxlength="8192" required></textarea>
+    </label>
+    <p id="editErr" class="err" hidden></p>
+    <div class="dlg-row">
+      <button value="cancel" class="btn-ghost">Cancel</button>
+      <button id="editSave" type="button" class="btn btn-primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="viewDialog" class="dlg">
+  <form method="dialog">
+    <h3 id="viewTitle"></h3>
+    <pre id="viewValue" class="codebox"></pre>
+    <div class="dlg-row">
+      <button id="copyBtn" type="button" class="btn-ghost">Copy</button>
+      <button id="deleteBtn" type="button" class="btn btn-danger">Delete</button>
+      <button value="cancel" class="btn-ghost">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/app.js" defer></script>
+</body>
+</html>
