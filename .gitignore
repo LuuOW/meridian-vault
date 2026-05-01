@@ -1,0 +1,48 @@
+# --- secrets (NEVER commit) ---
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+secrets/
+*-secret.json
+*-secrets.json
+passkeys.json
+subscriptions.json
+credentials*.json
+
+# --- python ---
+venv/
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# --- node / hardhat ---
+node_modules/
+dist/
+build/
+artifacts/
+cache/
+typechain-types/
+deployments/*-private.json
+
+# --- runtime / logs ---
+logs/
+*.log
+*.csv
+.backup-*/
+.backups/
+*.bak
+*.tmp
+re_entry_state.json
+
+# --- os / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
