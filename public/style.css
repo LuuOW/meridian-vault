@@ -185,3 +185,36 @@ textarea {
   white-space: pre-wrap; word-break: break-all;
   margin: 0;
 }
+
+/* ── SSH help disclosure on the lock screen ─────────────────────────── */
+.ssh-help {
+  margin-top: 22px;
+  padding: 12px 14px;
+  background: rgba(167, 139, 250, 0.06);
+  border: 1px solid rgba(167, 139, 250, 0.18);
+  border-radius: 10px;
+  font-size: 13px;
+}
+.ssh-help summary {
+  cursor: pointer;
+  list-style: none;
+  color: var(--text-muted);
+  font-weight: 500;
+}
+.ssh-help summary::-webkit-details-marker { display: none; }
+.ssh-help summary::before {
+  content: '▸';
+  display: inline-block;
+  margin-right: 6px;
+  color: var(--accent);
+  transition: transform 0.18s;
+}
+.ssh-help[open] summary::before { transform: rotate(90deg); }
+.ssh-help .codebox {
+  margin-top: 10px;
+  font-size: 11.5px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+.ssh-help .hint { margin: 8px 0 0; font-size: 12px; color: var(--text-muted); }

@@ -24,18 +24,35 @@
 <section id="lock" class="card lock-card">
   <div class="lock-icon">🔒</div>
   <h2>Unlock vault</h2>
-  <p class="lead">Use a passkey, or paste the bootstrap token.</p>
-
-  <button id="passkeyAuthBtn" class="btn btn-primary">Unlock with passkey</button>
-  <div class="divider"><span>or</span></div>
+  <p class="lead">Paste the bootstrap token, or sign in from the CLI with an SSH key.</p>
 
   <form id="tokenForm">
     <label>Bootstrap token
       <input id="tokenInput" type="password" placeholder="vault_…" autocomplete="off" required>
     </label>
-    <button type="submit" class="btn btn-ghost">Unlock with token</button>
+    <button type="submit" class="btn btn-primary">Unlock with token</button>
   </form>
   <p id="lockErr" class="err" hidden></p>
+
+  <!-- Hidden — kept in DOM so older app.js builds don't NPE on its absence
+       during the cache-bust window. New app.js never shows it. -->
+  <button id="passkeyAuthBtn" hidden></button>
+
+  <details class="ssh-help">
+    <summary>Sign in from a terminal with an Ed25519 SSH key</summary>
+    <pre class="codebox">FP=$(ssh-keygen -lf ~/.ssh/id_ed25519.pub | awk '{print $2}')
+CHAL=$(curl -sS -X POST -H 'Content-Type: application/json' \
+  --data "{\"fingerprint\":\"$FP\"}" \
+  https://vault.ask-meridian.uk/ssh/challenge)
+NONCE=$(echo "$CHAL" | jq -r .nonce)
+CID=$(echo "$CHAL" | jq -r .challenge_id)
+SIG=$(printf '%s' "$NONCE" | ssh-keygen -Y sign -n vault.ask-meridian.uk -f ~/.ssh/id_ed25519)
+curl -sS -X POST -H 'Content-Type: application/json' \
+  --data "$(jq -n --arg cid "$CID" --arg sig "$SIG" '{challenge_id:$cid,signature:$sig}')" \
+  https://vault.ask-meridian.uk/ssh/verify -c ~/.vault-cookies.txt</pre>
+    <p class="hint">Your SSH key must be registered first (use the
+    <em>SSH keys</em> panel after unlocking with the token).</p>
+  </details>
 </section>
 
 <!-- Authed view -->
@@ -52,12 +69,19 @@
 
   <section class="card">
     <header class="card-head">
-      <h2>Passkeys</h2>
-      <button id="enrollBtn" class="btn-ghost btn-sm">+ enroll passkey</button>
+      <h2>SSH keys</h2>
+      <button id="addSshBtn" class="btn-ghost btn-sm">+ add SSH key</button>
     </header>
-    <ul id="passkeysList" class="passkeys-list">
+    <ul id="sshList" class="passkeys-list">
       <li class="empty">Loading…</li>
     </ul>
+    <p class="hint">Once a key is registered, sign in from any terminal with
+    the SSH challenge flow (see the lock screen for the snippet).</p>
+
+    <!-- Legacy passkey nodes are gone; older bundle scripts still expect
+         these IDs to exist. Hidden no-ops so a stale cache doesn't NPE. -->
+    <ul id="passkeysList" hidden></ul>
+    <button id="enrollBtn" hidden></button>
 
     <header class="card-head" style="margin-top:18px">
       <h2>Session</h2>
@@ -65,6 +89,27 @@
     <button id="logoutBtn" class="btn-ghost">Log out</button>
   </section>
 </main>
+
+<dialog id="sshDialog" class="dlg">
+  <form method="dialog" id="sshForm">
+    <h3>Add SSH key</h3>
+    <p class="lead" style="font-size:13px;color:var(--muted)">
+      Only Ed25519 keys supported in this build. Paste the contents of
+      <code>~/.ssh/id_ed25519.pub</code>.
+    </p>
+    <label>Name
+      <input id="sshName" type="text" placeholder="macbook" required>
+    </label>
+    <label>Public key
+      <textarea id="sshKey" rows="3" required placeholder="ssh-ed25519 AAAA… user@host"></textarea>
+    </label>
+    <p id="sshErr" class="err" hidden></p>
+    <div class="dlg-row">
+      <button value="cancel" class="btn-ghost">Cancel</button>
+      <button id="sshSave" type="button" class="btn btn-primary">Register</button>
+    </div>
+  </form>
+</dialog>
 
 <!-- Edit dialog -->
 <dialog id="editDialog" class="dlg">

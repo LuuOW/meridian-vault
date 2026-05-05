@@ -1,4 +1,9 @@
-// vault frontend — token + passkey unlock, secret CRUD, passkey enroll/delete.
+// vault frontend — token unlock (browser) + SSH-key management.
+//
+// Edge build: passkey endpoints are stubbed at 501. The browser unlock path
+// is bearer-token only; SSH-key sign-in happens from a CLI (the lock screen
+// shows the snippet). This module handles everything else: secrets CRUD +
+// SSH key registration / listing / deletion.
 
 const $ = id => document.getElementById(id)
 const lock        = $('lock')
@@ -7,16 +12,14 @@ const authBadge   = $('authBadge')
 const tokenForm   = $('tokenForm')
 const tokenInput  = $('tokenInput')
 const lockErr     = $('lockErr')
-const passkeyAuthBtn = $('passkeyAuthBtn')
 
 const secretsList   = $('secretsList')
-const passkeysList  = $('passkeysList')
+const sshList       = $('sshList')
 const newBtn        = $('newBtn')
-const enrollBtn     = $('enrollBtn')
+const addSshBtn     = $('addSshBtn')
 const logoutBtn     = $('logoutBtn')
 
 const editDialog = $('editDialog')
-const editForm   = $('editForm')
 const editKey    = $('editKey')
 const editValue  = $('editValue')
 const editTitle  = $('editTitle')
@@ -28,6 +31,12 @@ const viewTitle  = $('viewTitle')
 const viewValue  = $('viewValue')
 const copyBtn    = $('copyBtn')
 const deleteBtn  = $('deleteBtn')
+
+const sshDialog = $('sshDialog')
+const sshName   = $('sshName')
+const sshKey    = $('sshKey')
+const sshSave   = $('sshSave')
+const sshErr    = $('sshErr')
 
 let currentEditKey = null
 let currentViewKey = null
@@ -41,29 +50,22 @@ const fetchJSON = async (url, opts = {}) => {
 }
 
 async function refreshAuth() {
-  // Lock screen is the safe default render — show it before fetching status,
-  // so even if /auth/status fails the user has a usable lock UI.
   try { lock.hidden = false; vault.hidden = true } catch {}
-
   try {
     const s = await fetchJSON('/auth/status')
     if (s.authed) {
-      authBadge.textContent = 'authed' + (s.passkeys ? ' · ' + s.passkeys + ' passkey' + (s.passkeys === 1 ? '' : 's') : '')
+      authBadge.textContent = 'authed'
       authBadge.className   = 'badge badge-ok'
       lock.hidden = true; vault.hidden = false
-      loadSecrets(); loadPasskeys()
-      passkeyAuthBtn.hidden = !s.passkeys
+      loadSecrets(); loadSshKeys()
     } else {
       authBadge.textContent = 'locked'
       authBadge.className   = 'badge badge-warn'
       lock.hidden = false; vault.hidden = true
-      const list = await fetch('/passkey/auth-options', { method: 'GET' }).catch(() => null)
-      passkeyAuthBtn.hidden = !list || !list.ok
     }
-  } catch (e) {
+  } catch {
     authBadge.textContent = 'offline'
     authBadge.className   = 'badge badge-warn'
-    // Even on /auth/status failure, keep the lock screen visible.
     lock.hidden = false; vault.hidden = true
   }
 }
@@ -81,25 +83,6 @@ tokenForm.addEventListener('submit', async (e) => {
     refreshAuth()
   } catch (err) {
     lockErr.textContent = err.message
-    lockErr.hidden = false
-  }
-})
-
-passkeyAuthBtn.addEventListener('click', async () => {
-  lockErr.hidden = true
-  try {
-    const opts = await fetchJSON('/passkey/auth-options')
-    const res = await navigator.credentials.get({
-      publicKey: deserializeAuthOptions(opts),
-    })
-    await fetchJSON('/passkey/auth-verify', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ response: serializeCredential(res) }),
-    })
-    refreshAuth()
-  } catch (err) {
-    lockErr.textContent = err.message || String(err)
     lockErr.hidden = false
   }
 })
@@ -184,99 +167,64 @@ deleteBtn.addEventListener('click', async () => {
   loadSecrets()
 })
 
-// PASSKEYS --------------------------------------------------------------
-async function loadPasskeys() {
+// SSH KEYS --------------------------------------------------------------
+async function loadSshKeys() {
   try {
-    const { credentials } = await fetchJSON('/passkey/list')
-    if (!credentials.length) {
-      passkeysList.innerHTML = '<li class="empty">No passkeys enrolled — token-only mode.</li>'
+    const { keys } = await fetchJSON('/ssh/list')
+    if (!keys.length) {
+      sshList.innerHTML = '<li class="empty">No SSH keys registered yet — click + add SSH key.</li>'
       return
     }
-    passkeysList.innerHTML = credentials
-      .map(c => `<li data-id="${esc(c.id)}">
-        <span class="key">${esc(c.label || 'passkey')}</span>
-        <span class="meta">${esc(c.id)} · ${fmt(c.created_at)}</span>
+    sshList.innerHTML = keys
+      .map(k => `<li data-fp="${esc(k.fingerprint)}">
+        <span class="key">${esc(k.name || 'unnamed')}</span>
+        <span class="meta">${esc(k.fingerprint)} · ${fmt(k.created_at)}</span>
       </li>`)
       .join('')
-    passkeysList.querySelectorAll('li').forEach(li =>
+    sshList.querySelectorAll('li').forEach(li =>
       li.addEventListener('click', async () => {
-        if (!confirm(`Delete passkey ${li.dataset.id}?`)) return
-        await fetchJSON('/passkey/delete', {
+        if (!confirm(`Remove SSH key ${li.dataset.fp}?`)) return
+        await fetchJSON('/ssh/delete', {
           method: 'POST',
           headers: { 'content-type': 'application/json' },
-          body: JSON.stringify({ id_prefix: li.dataset.id }),
+          body: JSON.stringify({ fingerprint: li.dataset.fp }),
         })
-        loadPasskeys()
+        loadSshKeys()
       })
     )
   } catch (e) {
-    passkeysList.innerHTML = `<li class="empty err">${esc(e.message)}</li>`
+    sshList.innerHTML = `<li class="empty err">${esc(e.message)}</li>`
   }
 }
 
-enrollBtn.addEventListener('click', async () => {
-  try {
-    const opts = await fetchJSON('/passkey/register-options')
-    const cred = await navigator.credentials.create({
-      publicKey: deserializeRegOptions(opts),
-    })
-    const label = prompt('Label for this passkey:', 'this device')
-    await fetchJSON('/passkey/register-verify', {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ response: serializeCredential(cred), label: label || 'passkey' }),
-    })
-    loadPasskeys(); refreshAuth()
-  } catch (e) {
-    alert('Enrollment failed: ' + (e.message || e))
-  }
+addSshBtn.addEventListener('click', () => {
+  sshName.value = ''; sshKey.value = ''
+  sshErr.hidden = true
+  sshDialog.showModal()
 })
 
-// WebAuthn helpers ------------------------------------------------------
-function b64urlToBuf(s) {
-  s = s.replace(/-/g, '+').replace(/_/g, '/')
-  while (s.length % 4) s += '='
-  const bin = atob(s)
-  const buf = new Uint8Array(bin.length)
-  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
-  return buf.buffer
-}
-function bufToB64url(buf) {
-  let bin = ''
-  const u8 = new Uint8Array(buf)
-  for (const b of u8) bin += String.fromCharCode(b)
-  return btoa(bin).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
-}
-
-function deserializeRegOptions(o) {
-  return {
-    ...o,
-    challenge: b64urlToBuf(o.challenge),
-    user: { ...o.user, id: b64urlToBuf(o.user.id) },
-    excludeCredentials: (o.excludeCredentials || []).map(c => ({ ...c, id: b64urlToBuf(c.id) })),
+sshSave.addEventListener('click', async () => {
+  sshErr.hidden = true
+  const name = sshName.value.trim()
+  const key  = sshKey.value.trim()
+  if (!name || !key) {
+    sshErr.textContent = 'name and key required'
+    sshErr.hidden = false
+    return
   }
-}
-function deserializeAuthOptions(o) {
-  return {
-    ...o,
-    challenge: b64urlToBuf(o.challenge),
-    allowCredentials: (o.allowCredentials || []).map(c => ({ ...c, id: b64urlToBuf(c.id) })),
+  try {
+    await fetchJSON('/ssh/register', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name, key }),
+    })
+    sshDialog.close()
+    loadSshKeys()
+  } catch (e) {
+    sshErr.textContent = e.message
+    sshErr.hidden = false
   }
-}
-function serializeCredential(c) {
-  const r = c.response
-  const out = {
-    id: c.id, rawId: bufToB64url(c.rawId), type: c.type,
-    response: {},
-    clientExtensionResults: c.getClientExtensionResults ? c.getClientExtensionResults() : {},
-    authenticatorAttachment: c.authenticatorAttachment || null,
-  }
-  for (const f of ['attestationObject', 'authenticatorData', 'clientDataJSON', 'signature', 'userHandle']) {
-    if (r[f]) out.response[f] = bufToB64url(r[f])
-  }
-  if (r.getTransports) out.response.transports = r.getTransports()
-  return out
-}
+})
 
 // utils ----------------------------------------------------------------
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
