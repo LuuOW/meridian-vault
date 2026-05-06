@@ -166,6 +166,8 @@ textarea {
 
 .err { color: var(--danger); font-size: 13px; margin-top: 10px; }
 
+[hidden] { display: none !important; }
+
 .vault-grid {
   display: grid; grid-template-columns: 1.6fr 1fr;
   gap: 18px;
