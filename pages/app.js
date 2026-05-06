@@ -22,13 +22,12 @@ const lock = $('lock'), vault = $('vault'), bootstrap = $('bootstrap'), authBadg
 const passkeyAuthBtn = $('passkeyAuthBtn'), passkeyAuthErr = $('passkeyAuthErr')
 const bootPat = $('bootPat'), bootBtn = $('bootBtn'), bootErr = $('bootErr')
 
-const secretsList = $('secretsList'), passkeysList = $('passkeysList'), sshList = $('sshList')
-const newBtn = $('newBtn'), addPasskeyBtn = $('addPasskeyBtn'), addSshBtn = $('addSshBtn')
-const logoutBtn = $('logoutBtn'), rotatePatBtn = $('rotatePatBtn')
+const secretsList = $('secretsList'), passkeysList = $('passkeysList')
+const newBtn = $('newBtn'), addPasskeyBtn = $('addPasskeyBtn'), logoutBtn = $('logoutBtn')
 
 const editDialog = $('editDialog'), editKey = $('editKey'), editValue = $('editValue'), editTitle = $('editTitle'), editSave = $('editSave'), editErr = $('editErr')
 const viewDialog = $('viewDialog'), viewTitle = $('viewTitle'), viewValue = $('viewValue'), copyBtn = $('copyBtn'), deleteBtn = $('deleteBtn')
-const sshDialog = $('sshDialog'), sshName = $('sshName'), sshKey = $('sshKey'), sshSave = $('sshSave'), sshErr = $('sshErr')
+const passkeyDialog = $('passkeyDialog'), passkeyEditName = $('passkeyEditName'), passkeyEditMeta = $('passkeyEditMeta'), passkeyEditErr = $('passkeyEditErr'), passkeySaveBtn = $('passkeySaveBtn'), passkeyDeleteBtn = $('passkeyDeleteBtn')
 
 let state = {
   pat: null, passphrase: null, doc: null, secrets: null, remoteSha: null,
@@ -263,7 +262,7 @@ function showLock() {
 function showVault() {
   bootstrap.hidden = true; lock.hidden = true; vault.hidden = false
   authBadge.textContent = 'authed'; authBadge.className = 'badge badge-ok'
-  renderSecrets(); renderPasskeys(); renderSshKeys()
+  renderSecrets(); renderPasskeys()
 }
 
 // ── Bootstrap (first passkey ever) ─────────────────────────────────────
@@ -435,14 +434,48 @@ function renderPasskeys() {
     <span class="meta">${esc(p.alg)} · ${fmt(p.createdAt)}</span>
   </li>`).join('')
   passkeysList.querySelectorAll('li').forEach(li =>
-    li.addEventListener('click', async () => {
-      if (!confirm(`Remove passkey "${li.querySelector('.key').textContent}"?`)) return
-      state.doc.passkeys = (state.doc.passkeys || []).filter(p => p.credentialId !== li.dataset.cid)
-      await commitState({ ...state.doc, version: 1 }, 'vault: remove passkey')
-      renderPasskeys()
-    })
+    li.addEventListener('click', () => openPasskeyDialog(li.dataset.cid))
   )
 }
+
+let _pkEditing = null
+function openPasskeyDialog(credentialId) {
+  const p = (state.doc?.passkeys || []).find(x => x.credentialId === credentialId)
+  if (!p) return
+  _pkEditing = credentialId
+  passkeyEditName.value = p.name
+  passkeyEditMeta.textContent = `${p.alg} · created ${fmt(p.createdAt)}`
+  passkeyEditErr.hidden = true
+  passkeySaveBtn.disabled = false; passkeyDeleteBtn.disabled = false
+  passkeyDialog.showModal()
+}
+
+passkeySaveBtn.addEventListener('click', async () => {
+  passkeyEditErr.hidden = true
+  const newName = passkeyEditName.value.trim()
+  if (!newName) { passkeyEditErr.textContent = 'name required'; passkeyEditErr.hidden = false; return }
+  passkeySaveBtn.disabled = true; passkeyDeleteBtn.disabled = true
+  state.doc.passkeys = (state.doc.passkeys || []).map(p =>
+    p.credentialId === _pkEditing ? { ...p, name: newName } : p
+  )
+  try { await commitState({ ...state.doc, version: 1 }, `vault: rename passkey to "${newName}"`) }
+  catch (e) { passkeyEditErr.textContent = e.message; passkeyEditErr.hidden = false; passkeySaveBtn.disabled = false; passkeyDeleteBtn.disabled = false; return }
+  passkeyDialog.close(); renderPasskeys()
+})
+
+passkeyDeleteBtn.addEventListener('click', async () => {
+  passkeyEditErr.hidden = true
+  if ((state.doc?.passkeys || []).length <= 1) {
+    passkeyEditErr.textContent = "Can't delete the last passkey — register another one first."
+    passkeyEditErr.hidden = false; return
+  }
+  if (!confirm(`Delete passkey "${passkeyEditName.value}"?`)) return
+  passkeySaveBtn.disabled = true; passkeyDeleteBtn.disabled = true
+  state.doc.passkeys = (state.doc.passkeys || []).filter(p => p.credentialId !== _pkEditing)
+  try { await commitState({ ...state.doc, version: 1 }, 'vault: delete passkey') }
+  catch (e) { passkeyEditErr.textContent = e.message; passkeyEditErr.hidden = false; passkeySaveBtn.disabled = false; passkeyDeleteBtn.disabled = false; return }
+  passkeyDialog.close(); renderPasskeys()
+})
 
 addPasskeyBtn.addEventListener('click', async () => {
   const name = prompt('Name this passkey:', 'passkey')
@@ -460,65 +493,10 @@ addPasskeyBtn.addEventListener('click', async () => {
   } catch (e) { alert('Passkey registration failed: ' + (e.message || e)) }
 })
 
-// ── Authed: ssh keys (CLI metadata) ────────────────────────────────────
-function renderSshKeys() {
-  const keys = state.doc?.ssh_keys || []
-  if (!keys.length) {
-    sshList.innerHTML = '<li class="empty">No SSH keys yet — click + add SSH key.</li>'
-    return
-  }
-  sshList.innerHTML = keys.map(k => `<li data-fp="${esc(k.fingerprint)}">
-    <span class="key">${esc(k.name)}</span>
-    <span class="meta">${esc(k.fingerprint)}</span>
-  </li>`).join('')
-  sshList.querySelectorAll('li').forEach(li =>
-    li.addEventListener('click', async () => {
-      if (!confirm(`Remove SSH key ${li.dataset.fp}?`)) return
-      state.doc.ssh_keys = (state.doc.ssh_keys || []).filter(k => k.fingerprint !== li.dataset.fp)
-      await commitState(state.doc, 'vault: remove ssh key')
-      renderSshKeys()
-    })
-  )
-}
-
-addSshBtn.addEventListener('click', () => {
-  sshName.value = ''; sshKey.value = ''; sshErr.hidden = true
-  sshDialog.showModal()
-})
-
-sshSave.addEventListener('click', async () => {
-  sshErr.hidden = true
-  const name = sshName.value.trim(), pubkey = sshKey.value.trim()
-  if (!name || !pubkey) { sshErr.textContent = 'name and key required'; sshErr.hidden = false; return }
-  const parts = pubkey.split(/\s+/)
-  if (parts[0] !== 'ssh-ed25519') { sshErr.textContent = 'only ssh-ed25519 supported'; sshErr.hidden = false; return }
-  let fp
-  try {
-    const blob = b64ToBuf(parts[1])
-    const hash = new Uint8Array(await crypto.subtle.digest('SHA-256', blob))
-    fp = 'SHA256:' + bufToB64(hash).replace(/=+$/, '')
-  } catch (e) { sshErr.textContent = 'malformed key: ' + e.message; sshErr.hidden = false; return }
-  state.doc = { ...(state.doc || { version: 1 }),
-    ssh_keys: [...(state.doc?.ssh_keys || []), { name, type: 'ssh-ed25519', pubkey, fingerprint: fp, createdAt: new Date().toISOString() }]
-  }
-  try { await commitState(state.doc, `vault: add ssh key "${name}"`) }
-  catch (e) { sshErr.textContent = e.message; sshErr.hidden = false; return }
-  sshDialog.close(); renderSshKeys()
-})
-
 // ── Session ────────────────────────────────────────────────────────────
 logoutBtn?.addEventListener('click', () => {
   state.passphrase = null; state.secrets = null; state.pat = null
   showLock()
-})
-
-rotatePatBtn?.addEventListener('click', async () => {
-  const next = prompt('New GitHub PAT (will replace GITHUB_PAT in the vault):')
-  if (!next) return
-  state.secrets.GITHUB_PAT = next.trim()
-  state.pat = next.trim()
-  try { await persistVault('rotate GITHUB_PAT'); alert('PAT rotated.') }
-  catch (e) { alert('Rotate failed: ' + e.message) }
 })
 
 // ── Utils ──────────────────────────────────────────────────────────────

@@ -65,24 +65,29 @@
     <ul id="passkeysList" class="passkeys-list">
       <li class="empty">Loading…</li>
     </ul>
-    <p class="hint">Each passkey wraps the master passphrase via the WebAuthn <code>prf</code> extension.</p>
-
-    <header class="card-head" style="margin-top:18px">
-      <h2>SSH keys (CLI only)</h2>
-      <button id="addSshBtn" class="btn-ghost btn-sm">+ add SSH key</button>
-    </header>
-    <ul id="sshList" class="passkeys-list">
-      <li class="empty">Loading…</li>
-    </ul>
-    <p class="hint">Used by the <code>vault-cli</code> tool to authenticate fetches. The UI doesn't accept SSH login — passkeys only.</p>
 
     <header class="card-head" style="margin-top:18px">
       <h2>Session</h2>
     </header>
-    <button id="rotatePatBtn" class="btn-ghost btn-block">Rotate GitHub PAT</button>
     <button id="logoutBtn" class="btn-ghost btn-block">Log out</button>
   </section>
 </main>
+
+<dialog id="passkeyDialog" class="dlg">
+  <form method="dialog">
+    <h3>Passkey</h3>
+    <label>Name
+      <input id="passkeyEditName" type="text" required>
+    </label>
+    <p class="meta" id="passkeyEditMeta" style="font-size:12px;color:var(--text-faint)"></p>
+    <p id="passkeyEditErr" class="err" hidden></p>
+    <div class="dlg-row">
+      <button id="passkeyDeleteBtn" type="button" class="btn btn-danger">Delete</button>
+      <button value="cancel" class="btn-ghost">Cancel</button>
+      <button id="passkeySaveBtn" type="button" class="btn btn-primary">Rename</button>
+    </div>
+  </form>
+</dialog>
 
 <!-- ── Dialogs ──────────────────────────────────────────────────────── -->
 <dialog id="editDialog" class="dlg">
@@ -114,23 +119,6 @@
   </form>
 </dialog>
 
-<dialog id="sshDialog" class="dlg">
-  <form method="dialog">
-    <h3>Add SSH key (CLI use)</h3>
-    <p class="lead" style="font-size:13px;color:var(--muted)">Ed25519 only. The CLI uses these for fetch authentication.</p>
-    <label>Name
-      <input id="sshName" type="text" placeholder="macbook" required>
-    </label>
-    <label>Public key
-      <textarea id="sshKey" rows="3" required placeholder="ssh-ed25519 AAAA… user@host"></textarea>
-    </label>
-    <p id="sshErr" class="err" hidden></p>
-    <div class="dlg-row">
-      <button value="cancel" class="btn-ghost">Cancel</button>
-      <button id="sshSave" type="button" class="btn btn-primary">Add</button>
-    </div>
-  </form>
-</dialog>
 
 <dialog id="passphraseDialog" class="dlg">
   <form method="dialog">
