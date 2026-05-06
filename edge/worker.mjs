@@ -5,7 +5,9 @@
 //   vault.enc.json          — AES-256-GCM blob of the secrets dict (as before).
 //   session:<id>            — opaque session token, 12 h TTL.
 //   sshkey:<fingerprint>    — registered SSH public keys (Ed25519 only).
-//   sshchal:<id>            — outstanding challenges, 90 s TTL.
+//   sshchal:<id>            — outstanding SSH challenges, 90 s TTL.
+//   passkey:<credId-b64u>   — registered WebAuthn credentials (ES256 + EdDSA).
+//   passkey_chal:<id-b64u>  — outstanding WebAuthn challenges, 5 min TTL.
 //
 // Auth methods:
 //   1. Bearer token (env VAULT_TOKEN) — bootstrap + headless clients.
@@ -13,7 +15,9 @@
 //      `ssh-keygen -Y sign -n vault.ask-meridian.uk -f ~/.ssh/id_ed25519`,
 //      submit the armored signature back. Verified at the edge using
 //      Web Crypto's Ed25519 primitive.
-//   3. Cookie session (vault_sess) once either of the above succeeds.
+//   3. WebAuthn passkeys (ES256 / EdDSA). Browser-native, no shared secret.
+//      Verified by hand on top of WebCrypto + a tiny CBOR decoder (no deps).
+//   4. Cookie session (vault_sess) once any of the above succeeds.
 //
 // PBKDF2 iterations are 100 000 because Workers Web Crypto caps at that
 // (legacy file vault used 200 000; the migrate-to-edge step re-encrypted).
@@ -352,6 +356,331 @@ async function sshVerify(req, env) {
   });
 }
 
+// ── WebAuthn / passkeys (ES256 + EdDSA, pure WebCrypto) ────────────────────
+// No SimpleWebAuthn dep — for a single-user vault, hand-rolling against
+// WebCrypto is shorter than the bundle plumbing would be. Only ES256
+// (alg -7, EC2 P-256) and EdDSA (alg -8, OKP Ed25519) are supported; those
+// cover essentially every platform/cross-platform passkey shipped today.
+const RP_ID   = 'vault.ask-meridian.uk';
+const RP_NAME = 'Meridian Vault';
+const ORIGIN  = 'https://vault.ask-meridian.uk';
+const PASSKEY_USER_ID = 'vault-user';   // single-tenant, fixed handle
+
+// b64url decoder helper. (b64urlFromBytes is already defined near the top.)
+function bytesFromB64url(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/');
+  while (s.length % 4) s += '=';
+  return bytesFromB64(s);
+}
+
+// Minimal CBOR decoder. Handles the major types used by COSE_Key +
+// attestationObject: 0=uint, 1=negint, 2=bytestring, 3=textstring, 4=array,
+// 5=map. Indefinite-length items aren't emitted by WebAuthn so we don't
+// implement them. Returns plain JS values, with maps as Map() so integer
+// keys (used by COSE) round-trip cleanly.
+class CborReader {
+  constructor(bytes) { this.b = bytes; this.p = 0; }
+  byte() { return this.b[this.p++]; }
+  read(n) { const o = this.b.slice(this.p, this.p + n); this.p += n; return o; }
+  argLen(ai) {
+    if (ai < 24) return ai;
+    if (ai === 24) return this.byte();
+    if (ai === 25) { const a = this.byte(), b = this.byte(); return (a << 8) | b; }
+    if (ai === 26) { let v = 0; for (let i = 0; i < 4; i++) v = v * 256 + this.byte(); return v; }
+    if (ai === 27) { let v = 0; for (let i = 0; i < 8; i++) v = v * 256 + this.byte(); return v; }
+    throw new Error('cbor: indefinite-length unsupported');
+  }
+  next() {
+    const initByte = this.byte();
+    const major = initByte >> 5;
+    const len = this.argLen(initByte & 0x1f);
+    switch (major) {
+      case 0: return len;
+      case 1: return -1 - len;
+      case 2: return this.read(len);
+      case 3: return new TextDecoder().decode(this.read(len));
+      case 4: { const arr = []; for (let i = 0; i < len; i++) arr.push(this.next()); return arr; }
+      case 5: { const m = new Map(); for (let i = 0; i < len; i++) { const k = this.next(); m.set(k, this.next()); } return m; }
+      default: throw new Error('cbor: major type ' + major + ' unsupported');
+    }
+  }
+}
+function cborDecode(bytes) { return new CborReader(bytes).next(); }
+
+// COSE_Key Map → { jwk, alg, importParams, verifyParams }.
+function coseToVerifyKey(cose) {
+  const kty = cose.get(1);
+  const alg = cose.get(3);
+  if (kty === 2 && alg === -7) {
+    const x = cose.get(-2), y = cose.get(-3);
+    if (!x || !y || x.length !== 32 || y.length !== 32) throw new Error('cose ES256: bad x/y');
+    return {
+      jwk: { kty: 'EC', crv: 'P-256', x: b64urlFromBytes(x), y: b64urlFromBytes(y), ext: true, key_ops: ['verify'] },
+      alg, importParams: { name: 'ECDSA', namedCurve: 'P-256' }, verifyParams: { name: 'ECDSA', hash: 'SHA-256' },
+    };
+  }
+  if (kty === 1 && alg === -8) {
+    const x = cose.get(-2);
+    if (!x || x.length !== 32) throw new Error('cose EdDSA: bad x');
+    return {
+      jwk: { kty: 'OKP', crv: 'Ed25519', x: b64urlFromBytes(x), ext: true, key_ops: ['verify'] },
+      alg, importParams: { name: 'Ed25519' }, verifyParams: { name: 'Ed25519' },
+    };
+  }
+  throw new Error(`unsupported COSE key (kty=${kty} alg=${alg}); only ES256+EdDSA accepted`);
+}
+
+// Authenticator Data binary layout (WebAuthn §6.1):
+//   rpIdHash[32] | flags[1] | signCount[4] | [attestedCredData] | [extensions]
+function parseAuthData(authData) {
+  if (authData.length < 37) throw new Error('authData too short');
+  const rpIdHash = authData.slice(0, 32);
+  const flags = authData[32];
+  const signCount =
+    (authData[33] * 0x1000000) + (authData[34] << 16) + (authData[35] << 8) + authData[36];
+  const out = {
+    rpIdHash, flags, signCount,
+    userPresent:  !!(flags & 0x01),
+    userVerified: !!(flags & 0x04),
+    hasAttested:  !!(flags & 0x40),
+  };
+  if (out.hasAttested) {
+    if (authData.length < 55) throw new Error('attested cred data missing');
+    out.aaguid = authData.slice(37, 53);
+    const credIdLen = (authData[53] << 8) | authData[54];
+    out.credentialId = authData.slice(55, 55 + credIdLen);
+    const r = new CborReader(authData.slice(55 + credIdLen));
+    out.credentialPublicKey = r.next();
+  }
+  return out;
+}
+
+// DER ECDSA signature (SEQUENCE { INTEGER r, INTEGER s }) → raw r||s of fieldLen each.
+function derEcdsaToRaw(der, fieldLen) {
+  if (der[0] !== 0x30) throw new Error('der: not sequence');
+  let p = 2;
+  if (der[1] & 0x80) p = 2 + (der[1] & 0x7f);
+  if (der[p++] !== 0x02) throw new Error('der: not INTEGER r');
+  let rlen = der[p++]; let r = der.slice(p, p + rlen); p += rlen;
+  if (der[p++] !== 0x02) throw new Error('der: not INTEGER s');
+  let slen = der[p++]; let s = der.slice(p, p + slen);
+  while (r.length > fieldLen && r[0] === 0) r = r.slice(1);
+  while (s.length > fieldLen && s[0] === 0) s = s.slice(1);
+  if (r.length > fieldLen || s.length > fieldLen) throw new Error('der: oversized r/s');
+  const out = new Uint8Array(2 * fieldLen);
+  out.set(r, fieldLen - r.length);
+  out.set(s, 2 * fieldLen - s.length);
+  return out;
+}
+
+async function passkeyRegisterOptions(req, env) {
+  if (!(await authed(req, env)))
+    return jsonRes({ error: 'unauthorized — sign in (token/ssh) before enrolling a passkey' }, { status: 401 });
+  const body = await req.json().catch(() => ({}));
+  const name = (body.name || 'passkey').slice(0, 64);
+
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const cid = b64urlFromBytes(crypto.getRandomValues(new Uint8Array(16)));
+  await env.VAULT_KV.put('passkey_chal:' + cid, JSON.stringify({
+    challenge_b64u: b64urlFromBytes(challenge),
+    type: 'register', name,
+  }), { expirationTtl: 300 });
+
+  const listed = await env.VAULT_KV.list({ prefix: 'passkey:' });
+  const excludeCredentials = listed.keys.map(k => ({
+    type: 'public-key', id: k.name.slice('passkey:'.length),
+  }));
+
+  return jsonRes({
+    challenge_id: cid,
+    options: {
+      challenge: b64urlFromBytes(challenge),
+      rp:   { id: RP_ID, name: RP_NAME },
+      user: {
+        id: b64urlFromBytes(new TextEncoder().encode(PASSKEY_USER_ID)),
+        name: 'vault', displayName: 'Meridian Vault',
+      },
+      pubKeyCredParams: [
+        { type: 'public-key', alg: -7 },   // ES256
+        { type: 'public-key', alg: -8 },   // EdDSA
+      ],
+      timeout: 60_000,
+      authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
+      attestation: 'none',
+      excludeCredentials,
+    },
+  });
+}
+
+async function passkeyRegisterVerify(req, env) {
+  if (!(await authed(req, env))) return jsonRes({ error: 'unauthorized' }, { status: 401 });
+  const body = await req.json().catch(() => ({}));
+  const cid  = body.challenge_id;
+  const cred = body.credential;
+  if (!cid || !cred) return jsonRes({ error: 'challenge_id + credential required' }, { status: 400 });
+
+  const chal = await env.VAULT_KV.get('passkey_chal:' + cid, 'json');
+  if (!chal || chal.type !== 'register') return jsonRes({ error: 'challenge expired or wrong type' }, { status: 400 });
+
+  let clientData;
+  try { clientData = JSON.parse(new TextDecoder().decode(bytesFromB64url(cred.response.clientDataJSON))); }
+  catch (e) { return jsonRes({ error: 'bad clientDataJSON: ' + e.message }, { status: 400 }); }
+  if (clientData.type !== 'webauthn.create')          return jsonRes({ error: 'wrong clientData type' }, { status: 400 });
+  if (clientData.challenge !== chal.challenge_b64u)   return jsonRes({ error: 'challenge mismatch' }, { status: 400 });
+  if (clientData.origin !== ORIGIN)                   return jsonRes({ error: 'origin mismatch (got ' + clientData.origin + ')' }, { status: 400 });
+
+  let attest;
+  try { attest = cborDecode(bytesFromB64url(cred.response.attestationObject)); }
+  catch (e) { return jsonRes({ error: 'bad attestationObject: ' + e.message }, { status: 400 }); }
+  const authData = attest.get('authData');
+  if (!authData) return jsonRes({ error: 'missing authData' }, { status: 400 });
+
+  let parsed;
+  try { parsed = parseAuthData(authData); }
+  catch (e) { return jsonRes({ error: 'parse authData: ' + e.message }, { status: 400 }); }
+  if (!parsed.userPresent) return jsonRes({ error: 'user-presence flag not set' }, { status: 400 });
+  if (!parsed.hasAttested) return jsonRes({ error: 'no attested cred data' }, { status: 400 });
+
+  const expectedRpHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)));
+  for (let i = 0; i < 32; i++)
+    if (expectedRpHash[i] !== parsed.rpIdHash[i]) return jsonRes({ error: 'rpIdHash mismatch' }, { status: 400 });
+
+  let pk;
+  try { pk = coseToVerifyKey(parsed.credentialPublicKey); }
+  catch (e) { return jsonRes({ error: e.message }, { status: 400 }); }
+
+  // Sanity check: the imported key actually loads via WebCrypto.
+  try { await crypto.subtle.importKey('jwk', pk.jwk, pk.importParams, false, ['verify']); }
+  catch (e) { return jsonRes({ error: 'importKey failed: ' + e.message }, { status: 400 }); }
+
+  const credIdB64u = b64urlFromBytes(parsed.credentialId);
+  await env.VAULT_KV.put('passkey:' + credIdB64u, JSON.stringify({
+    name: chal.name, jwk: pk.jwk, alg: pk.alg,
+    signCount: parsed.signCount, created_at: new Date().toISOString(),
+  }));
+  await env.VAULT_KV.delete('passkey_chal:' + cid);
+  return jsonRes({ ok: true, credentialId: credIdB64u, name: chal.name });
+}
+
+async function passkeyAuthOptions(req, env) {
+  const challenge = crypto.getRandomValues(new Uint8Array(32));
+  const cid = b64urlFromBytes(crypto.getRandomValues(new Uint8Array(16)));
+  await env.VAULT_KV.put('passkey_chal:' + cid, JSON.stringify({
+    challenge_b64u: b64urlFromBytes(challenge), type: 'auth',
+  }), { expirationTtl: 300 });
+
+  const listed = await env.VAULT_KV.list({ prefix: 'passkey:' });
+  const allowCredentials = listed.keys.map(k => ({
+    type: 'public-key', id: k.name.slice('passkey:'.length),
+  }));
+  return jsonRes({
+    challenge_id: cid,
+    options: {
+      challenge: b64urlFromBytes(challenge),
+      rpId: RP_ID, timeout: 60_000,
+      userVerification: 'preferred',
+      allowCredentials,
+    },
+  });
+}
+
+async function passkeyAuthVerify(req, env) {
+  const body = await req.json().catch(() => ({}));
+  const cid  = body.challenge_id;
+  const cred = body.credential;
+  if (!cid || !cred) return jsonRes({ error: 'challenge_id + credential required' }, { status: 400 });
+
+  const chal = await env.VAULT_KV.get('passkey_chal:' + cid, 'json');
+  if (!chal || chal.type !== 'auth') return jsonRes({ error: 'challenge expired or wrong type' }, { status: 400 });
+
+  let clientData;
+  try { clientData = JSON.parse(new TextDecoder().decode(bytesFromB64url(cred.response.clientDataJSON))); }
+  catch (e) { return jsonRes({ error: 'bad clientDataJSON: ' + e.message }, { status: 400 }); }
+  if (clientData.type !== 'webauthn.get')             return jsonRes({ error: 'wrong clientData type' }, { status: 400 });
+  if (clientData.challenge !== chal.challenge_b64u)   return jsonRes({ error: 'challenge mismatch' }, { status: 400 });
+  if (clientData.origin !== ORIGIN)                   return jsonRes({ error: 'origin mismatch' }, { status: 400 });
+
+  const credId = cred.id;
+  const stored = await env.VAULT_KV.get('passkey:' + credId, 'json');
+  if (!stored) return jsonRes({ error: 'unknown credential id' }, { status: 401 });
+
+  const authData = bytesFromB64url(cred.response.authenticatorData);
+  let parsed;
+  try { parsed = parseAuthData(authData); }
+  catch (e) { return jsonRes({ error: 'parse authData: ' + e.message }, { status: 400 }); }
+  if (!parsed.userPresent) return jsonRes({ error: 'user-presence flag not set' }, { status: 400 });
+
+  const expectedRpHash = new Uint8Array(await crypto.subtle.digest('SHA-256', new TextEncoder().encode(RP_ID)));
+  for (let i = 0; i < 32; i++)
+    if (expectedRpHash[i] !== parsed.rpIdHash[i]) return jsonRes({ error: 'rpIdHash mismatch' }, { status: 400 });
+
+  // Sign-counter monotonicity. Some platform authenticators (notably iCloud
+  // Keychain / Apple) always emit 0; we accept that case but still detect
+  // regressions when the authenticator does maintain a counter.
+  if (parsed.signCount !== 0 && parsed.signCount <= stored.signCount)
+    return jsonRes({ error: 'signCount regressed (possible cloned authenticator)' }, { status: 400 });
+
+  const cdjHash = new Uint8Array(await crypto.subtle.digest('SHA-256', bytesFromB64url(cred.response.clientDataJSON)));
+  const signedData = concat(authData, cdjHash);
+
+  let sigBytes = bytesFromB64url(cred.response.signature);
+  let importParams, verifyParams;
+  if (stored.alg === -7) {
+    sigBytes = derEcdsaToRaw(sigBytes, 32);
+    importParams = { name: 'ECDSA', namedCurve: 'P-256' };
+    verifyParams = { name: 'ECDSA', hash: 'SHA-256' };
+  } else if (stored.alg === -8) {
+    importParams = { name: 'Ed25519' };
+    verifyParams = { name: 'Ed25519' };
+  } else {
+    return jsonRes({ error: 'unsupported stored alg ' + stored.alg }, { status: 500 });
+  }
+
+  let valid;
+  try {
+    const cryptoKey = await crypto.subtle.importKey('jwk', stored.jwk, importParams, false, ['verify']);
+    valid = await crypto.subtle.verify(verifyParams, cryptoKey, sigBytes, signedData);
+  } catch (e) { return jsonRes({ error: 'verify error: ' + e.message }, { status: 500 }); }
+  if (!valid) return jsonRes({ error: 'signature invalid' }, { status: 401 });
+
+  stored.signCount = parsed.signCount;
+  await env.VAULT_KV.put('passkey:' + credId, JSON.stringify(stored));
+  await env.VAULT_KV.delete('passkey_chal:' + cid);
+  const sess = await newSession(env);
+  return jsonRes({ ok: true, credentialId: credId, name: stored.name }, {
+    headers: { 'set-cookie': `vault_sess=${sess}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${12*3600}` },
+  });
+}
+
+async function passkeyList(req, env) {
+  if (!(await authed(req, env))) return jsonRes({ error: 'unauthorized' }, { status: 401 });
+  const listed = await env.VAULT_KV.list({ prefix: 'passkey:' });
+  const keys = [];
+  for (const k of listed.keys) {
+    const v = await env.VAULT_KV.get(k.name, 'json');
+    if (v) keys.push({
+      credentialId: k.name.slice('passkey:'.length),
+      name: v.name,
+      alg: v.alg === -7 ? 'ES256' : v.alg === -8 ? 'EdDSA' : 'alg' + v.alg,
+      created_at: v.created_at,
+    });
+  }
+  return jsonRes({ keys });
+}
+
+async function passkeyDelete(req, env) {
+  if (!(await authed(req, env))) return jsonRes({ error: 'unauthorized' }, { status: 401 });
+  const body = await req.json().catch(() => ({}));
+  if (!body.credentialId) return jsonRes({ error: 'credentialId required' }, { status: 400 });
+  await env.VAULT_KV.delete('passkey:' + body.credentialId);
+  return jsonRes({ ok: true });
+}
+
+async function countPasskeys(env) {
+  const listed = await env.VAULT_KV.list({ prefix: 'passkey:' });
+  return listed.keys.length;
+}
+
 // ── Main router ────────────────────────────────────────────────────────────
 async function handle(req, env) {
   const url = new URL(req.url);
@@ -362,7 +691,7 @@ async function handle(req, env) {
 
   if (path === '/health') {
     return jsonRes({ ok: true, name: 'meridian-vault', edge: 'cloudflare-workers',
-                     auth: ['bearer', 'ssh-ed25519', 'session'] });
+                     auth: ['bearer', 'ssh-ed25519', 'webauthn-passkey', 'session'] });
   }
 
   if (path === '/auth/token' && req.method === 'POST') {
@@ -384,7 +713,7 @@ async function handle(req, env) {
   if (path === '/auth/status') {
     const sess = parseCookies(req.headers.get('cookie') || '').vault_sess;
     const ok = await checkSession(env, sess);
-    return jsonRes({ authed: ok, passkeys: 0 });
+    return jsonRes({ authed: ok, passkeys: await countPasskeys(env) });
   }
 
   // SSH-key auth ─────────────────────────────────────────────────────────────
@@ -394,11 +723,13 @@ async function handle(req, env) {
   if (path === '/ssh/challenge' && req.method === 'POST') return await sshChallenge(req, env);
   if (path === '/ssh/verify'    && req.method === 'POST') return await sshVerify(req, env);
 
-  // Passkey endpoints stubbed (the legacy server.mjs implementation depended on
-  // SimpleWebAuthn which isn't ported in this round; bearer + ssh is enough).
-  if (path.startsWith('/passkey/')) {
-    return jsonRes({ error: 'passkey auth not available on edge build; use bearer or ssh' }, { status: 501 });
-  }
+  // WebAuthn passkey auth ──────────────────────────────────────────────────
+  if (path === '/passkey/register-options' && req.method === 'POST') return await passkeyRegisterOptions(req, env);
+  if (path === '/passkey/register-verify'  && req.method === 'POST') return await passkeyRegisterVerify(req, env);
+  if (path === '/passkey/auth-options'     && req.method === 'POST') return await passkeyAuthOptions(req, env);
+  if (path === '/passkey/auth-verify'      && req.method === 'POST') return await passkeyAuthVerify(req, env);
+  if (path === '/passkey/list'             && req.method === 'GET')  return await passkeyList(req, env);
+  if (path === '/passkey/delete'           && req.method === 'POST') return await passkeyDelete(req, env);
 
   // Secrets API
   if (path.startsWith('/secrets')) {

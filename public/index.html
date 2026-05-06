@@ -24,35 +24,27 @@
 <section id="lock" class="card lock-card">
   <div class="lock-icon">🔒</div>
   <h2>Unlock vault</h2>
-  <p class="lead">Paste the bootstrap token, or sign in from the CLI with an SSH key.</p>
+  <p class="lead">Sign in with a passkey, paste the bootstrap token, or use SSH from a terminal.</p>
+
+  <button id="passkeyAuthBtn" type="button" class="btn btn-primary lock-passkey">
+    🔑 Sign in with passkey
+  </button>
+  <p id="passkeyAuthErr" class="err" hidden></p>
+
+  <div class="lock-or"><span>or</span></div>
 
   <form id="tokenForm">
     <label>Bootstrap token
       <input id="tokenInput" type="password" placeholder="vault_…" autocomplete="off" required>
     </label>
-    <button type="submit" class="btn btn-primary">Unlock with token</button>
+    <button type="submit" class="btn btn-secondary">Unlock with token</button>
   </form>
   <p id="lockErr" class="err" hidden></p>
 
-  <!-- Hidden — kept in DOM so older app.js builds don't NPE on its absence
-       during the cache-bust window. New app.js never shows it. -->
-  <button id="passkeyAuthBtn" hidden></button>
-
-  <details class="ssh-help">
-    <summary>Sign in from a terminal with an Ed25519 SSH key</summary>
-    <pre class="codebox">FP=$(ssh-keygen -lf ~/.ssh/id_ed25519.pub | awk '{print $2}')
-CHAL=$(curl -sS -X POST -H 'Content-Type: application/json' \
-  --data "{\"fingerprint\":\"$FP\"}" \
-  https://vault.ask-meridian.uk/ssh/challenge)
-NONCE=$(echo "$CHAL" | jq -r .nonce)
-CID=$(echo "$CHAL" | jq -r .challenge_id)
-SIG=$(printf '%s' "$NONCE" | ssh-keygen -Y sign -n vault.ask-meridian.uk -f ~/.ssh/id_ed25519)
-curl -sS -X POST -H 'Content-Type: application/json' \
-  --data "$(jq -n --arg cid "$CID" --arg sig "$SIG" '{challenge_id:$cid,signature:$sig}')" \
-  https://vault.ask-meridian.uk/ssh/verify -c ~/.vault-cookies.txt</pre>
-    <p class="hint">Your SSH key must be registered first (use the
-    <em>SSH keys</em> panel after unlocking with the token).</p>
-  </details>
+  <p class="hint" style="margin-top:14px">
+    No passkey yet? Unlock with the bootstrap token first, then register one
+    from inside the vault. Touch ID / Windows Hello / YubiKey all work.
+  </p>
 </section>
 
 <!-- Authed view -->
@@ -69,18 +61,36 @@ curl -sS -X POST -H 'Content-Type: application/json' \
 
   <section class="card">
     <header class="card-head">
+      <h2>Passkeys</h2>
+      <button id="addPasskeyBtn" class="btn-ghost btn-sm">+ register passkey</button>
+    </header>
+    <ul id="passkeysList" class="passkeys-list">
+      <li class="empty">Loading…</li>
+    </ul>
+    <p class="hint">Touch ID, Windows Hello, YubiKey — any WebAuthn authenticator. Bound to <code>vault.ask-meridian.uk</code>.</p>
+
+    <header class="card-head" style="margin-top:18px">
       <h2>SSH keys</h2>
       <button id="addSshBtn" class="btn-ghost btn-sm">+ add SSH key</button>
     </header>
     <ul id="sshList" class="passkeys-list">
       <li class="empty">Loading…</li>
     </ul>
-    <p class="hint">Once a key is registered, sign in from any terminal with
-    the SSH challenge flow (see the lock screen for the snippet).</p>
+    <details class="ssh-help" style="margin-top:8px">
+      <summary>Sign in from a terminal with an Ed25519 SSH key</summary>
+      <pre class="codebox">FP=$(ssh-keygen -lf ~/.ssh/id_ed25519.pub | awk '{print $2}')
+CHAL=$(curl -sS -X POST -H 'Content-Type: application/json' \
+  --data "{\"fingerprint\":\"$FP\"}" \
+  https://vault.ask-meridian.uk/ssh/challenge)
+NONCE=$(echo "$CHAL" | jq -r .nonce)
+CID=$(echo "$CHAL" | jq -r .challenge_id)
+SIG=$(printf '%s' "$NONCE" | ssh-keygen -Y sign -n vault.ask-meridian.uk -f ~/.ssh/id_ed25519)
+curl -sS -X POST -H 'Content-Type: application/json' \
+  --data "$(jq -n --arg cid "$CID" --arg sig "$SIG" '{challenge_id:$cid,signature:$sig}')" \
+  https://vault.ask-meridian.uk/ssh/verify -c ~/.vault-cookies.txt</pre>
+    </details>
 
-    <!-- Legacy passkey nodes are gone; older bundle scripts still expect
-         these IDs to exist. Hidden no-ops so a stale cache doesn't NPE. -->
-    <ul id="passkeysList" hidden></ul>
+    <!-- Legacy enroll button still referenced by older cached app.js. -->
     <button id="enrollBtn" hidden></button>
 
     <header class="card-head" style="margin-top:18px">

@@ -1,19 +1,19 @@
-// vault frontend — token unlock (browser) + SSH-key management.
-//
-// Edge build: passkey endpoints are stubbed at 501. The browser unlock path
-// is bearer-token only; SSH-key sign-in happens from a CLI (the lock screen
-// shows the snippet). This module handles everything else: secrets CRUD +
-// SSH key registration / listing / deletion.
+// vault frontend — three sign-in paths (passkey, token, SSH-from-CLI),
+// plus secrets / passkey / SSH-key management once authed.
 
 const $ = id => document.getElementById(id)
-const lock        = $('lock')
-const vault       = $('vault')
-const authBadge   = $('authBadge')
-const tokenForm   = $('tokenForm')
-const tokenInput  = $('tokenInput')
-const lockErr     = $('lockErr')
+const lock         = $('lock')
+const vault        = $('vault')
+const authBadge    = $('authBadge')
+const tokenForm    = $('tokenForm')
+const tokenInput   = $('tokenInput')
+const lockErr      = $('lockErr')
+const passkeyAuthBtn = $('passkeyAuthBtn')
+const passkeyAuthErr = $('passkeyAuthErr')
 
 const secretsList   = $('secretsList')
+const passkeysList  = $('passkeysList')
+const addPasskeyBtn = $('addPasskeyBtn')
 const sshList       = $('sshList')
 const newBtn        = $('newBtn')
 const addSshBtn     = $('addSshBtn')
@@ -57,7 +57,7 @@ async function refreshAuth() {
       authBadge.textContent = 'authed'
       authBadge.className   = 'badge badge-ok'
       lock.hidden = true; vault.hidden = false
-      loadSecrets(); loadSshKeys()
+      loadSecrets(); loadPasskeys(); loadSshKeys()
     } else {
       authBadge.textContent = 'locked'
       authBadge.className   = 'badge badge-warn'
@@ -223,6 +223,134 @@ sshSave.addEventListener('click', async () => {
   } catch (e) {
     sshErr.textContent = e.message
     sshErr.hidden = false
+  }
+})
+
+// PASSKEYS --------------------------------------------------------------
+// b64url <-> ArrayBuffer for the WebAuthn JS API.
+function b64urlToBuf(s) {
+  s = s.replace(/-/g, '+').replace(/_/g, '/')
+  while (s.length % 4) s += '='
+  const bin = atob(s)
+  const buf = new Uint8Array(bin.length)
+  for (let i = 0; i < bin.length; i++) buf[i] = bin.charCodeAt(i)
+  return buf.buffer
+}
+function bufToB64url(buf) {
+  const bytes = new Uint8Array(buf)
+  let s = ''
+  for (let i = 0; i < bytes.length; i++) s += String.fromCharCode(bytes[i])
+  return btoa(s).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+}
+
+async function loadPasskeys() {
+  if (!passkeysList) return
+  try {
+    const { keys } = await fetchJSON('/passkey/list')
+    if (!keys.length) {
+      passkeysList.innerHTML = '<li class="empty">No passkeys yet — click + register passkey.</li>'
+      return
+    }
+    passkeysList.innerHTML = keys
+      .map(k => `<li data-cid="${esc(k.credentialId)}">
+        <span class="key">${esc(k.name)}</span>
+        <span class="meta">${esc(k.alg)} · ${fmt(k.created_at)}</span>
+      </li>`)
+      .join('')
+    passkeysList.querySelectorAll('li').forEach(li =>
+      li.addEventListener('click', async () => {
+        if (!confirm(`Remove passkey "${li.querySelector('.key').textContent}"?`)) return
+        await fetchJSON('/passkey/delete', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ credentialId: li.dataset.cid }),
+        })
+        loadPasskeys()
+      })
+    )
+  } catch (e) {
+    passkeysList.innerHTML = `<li class="empty err">${esc(e.message)}</li>`
+  }
+}
+
+if (addPasskeyBtn) addPasskeyBtn.addEventListener('click', async () => {
+  if (!('credentials' in navigator) || !window.PublicKeyCredential) {
+    alert('Passkeys are not supported in this browser.')
+    return
+  }
+  const name = prompt('Name this passkey (e.g. "macbook touch id"):', 'passkey')
+  if (!name) return
+  try {
+    const { challenge_id, options } = await fetchJSON('/passkey/register-options', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ name }),
+    })
+    options.challenge = b64urlToBuf(options.challenge)
+    options.user.id   = b64urlToBuf(options.user.id)
+    if (options.excludeCredentials)
+      for (const c of options.excludeCredentials) c.id = b64urlToBuf(c.id)
+    const cred = await navigator.credentials.create({ publicKey: options })
+    if (!cred) throw new Error('No credential returned')
+    await fetchJSON('/passkey/register-verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        challenge_id,
+        credential: {
+          id: cred.id,
+          rawId: bufToB64url(cred.rawId),
+          type: cred.type,
+          response: {
+            clientDataJSON:    bufToB64url(cred.response.clientDataJSON),
+            attestationObject: bufToB64url(cred.response.attestationObject),
+          },
+        },
+      }),
+    })
+    loadPasskeys()
+  } catch (e) {
+    alert('Passkey registration failed: ' + (e.message || e))
+  }
+})
+
+if (passkeyAuthBtn) passkeyAuthBtn.addEventListener('click', async () => {
+  passkeyAuthErr.hidden = true
+  if (!('credentials' in navigator) || !window.PublicKeyCredential) {
+    passkeyAuthErr.textContent = 'Passkeys not supported in this browser.'
+    passkeyAuthErr.hidden = false
+    return
+  }
+  try {
+    const { challenge_id, options } = await fetchJSON('/passkey/auth-options', { method: 'POST' })
+    options.challenge = b64urlToBuf(options.challenge)
+    if (!options.allowCredentials || !options.allowCredentials.length)
+      throw new Error('No passkeys registered yet — unlock with token first, then enrol one.')
+    for (const c of options.allowCredentials) c.id = b64urlToBuf(c.id)
+    const cred = await navigator.credentials.get({ publicKey: options })
+    if (!cred) throw new Error('No credential returned')
+    await fetchJSON('/passkey/auth-verify', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        challenge_id,
+        credential: {
+          id: cred.id,
+          rawId: bufToB64url(cred.rawId),
+          type: cred.type,
+          response: {
+            clientDataJSON:    bufToB64url(cred.response.clientDataJSON),
+            authenticatorData: bufToB64url(cred.response.authenticatorData),
+            signature:         bufToB64url(cred.response.signature),
+            userHandle: cred.response.userHandle ? bufToB64url(cred.response.userHandle) : null,
+          },
+        },
+      }),
+    })
+    refreshAuth()
+  } catch (e) {
+    passkeyAuthErr.textContent = e.message || String(e)
+    passkeyAuthErr.hidden = false
   }
 })
 

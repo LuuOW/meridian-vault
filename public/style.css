@@ -59,6 +59,18 @@ a { color: var(--accent); text-decoration: none; }
 }
 .lock-icon { font-size: 36px; margin-bottom: 10px; }
 .lock-card h2 { margin: 0 0 6px; }
+.lock-passkey { width: 100%; margin: 14px 0 4px; font-size: 15px; padding: 12px; }
+.lock-or {
+  margin: 16px 0 12px; text-align: center; position: relative;
+  color: var(--text-faint); font-size: 11px; letter-spacing: 0.18em;
+}
+.lock-or::before, .lock-or::after {
+  content: ''; position: absolute; top: 50%;
+  width: 42%; height: 1px; background: var(--border);
+}
+.lock-or::before { left: 0; }
+.lock-or::after  { right: 0; }
+.lock-or span { background: var(--bg-card, var(--bg)); padding: 0 10px; position: relative; z-index: 1; text-transform: uppercase; }
 .lead { color: var(--text-muted); margin: 0 0 22px; font-size: 14px; }
 .divider {
   margin: 18px 0;
