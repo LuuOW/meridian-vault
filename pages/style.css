@@ -78,12 +78,16 @@ a { color: var(--accent); text-decoration: none; }
 .setup-steps .step .hint { margin: 0 0 10px; font-size: 12.5px; }
 
 .reset-details { margin-top: 22px; text-align: left; }
+.reset-details { text-align: center; margin-top: 32px; }
 .reset-details summary {
-  cursor: pointer; font-size: 12px; color: var(--text-muted);
-  padding: 6px 0; outline: none; user-select: none;
+  cursor: pointer; font-size: 14px; color: var(--text-faint);
+  padding: 4px 0; outline: none; user-select: none;
+  list-style: none; opacity: 0.4;
 }
-.reset-details summary:hover { color: var(--text); }
-.reset-details[open] summary { color: var(--text); }
+.reset-details summary::-webkit-details-marker { display: none; }
+.reset-details summary:hover { color: var(--text-muted); opacity: 0.8; }
+.reset-details[open] summary { color: var(--text); opacity: 1; }
+.reset-details[open] { text-align: left; }
 
 .lock-or {
   margin: 16px 0 12px; text-align: center; position: relative;

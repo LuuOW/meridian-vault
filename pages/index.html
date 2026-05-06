@@ -63,11 +63,10 @@
   <p id="setupErr" class="err" hidden></p>
 </section>
 
-<!-- ── Lock screen — passkey only ───────────────────────────────────── -->
+<!-- ── Lock screen — single button ──────────────────────────────────── -->
 <section id="lock" class="card lock-card" hidden>
   <div class="lock-icon">🔒</div>
-  <h2>Unlock vault</h2>
-  <p class="lead">Sign in with a passkey. Your local one, or another device via QR / NFC / USB key.</p>
+  <h2>Meridian Vault</h2>
 
   <button id="passkeyAuthBtn" type="button" class="btn btn-primary lock-passkey">
     🔑 Sign in with passkey
@@ -75,8 +74,8 @@
   <p id="passkeyAuthErr" class="err" hidden></p>
 
   <details class="reset-details">
-    <summary>Lost all your passkeys?</summary>
-    <p class="hint">Enter your master passphrase. After unlocking, register a new passkey.</p>
+    <summary>·</summary>
+    <p class="hint">Lost every passkey? Recover with the master passphrase.</p>
     <label>Master passphrase
       <input id="lockPassphrase" type="password" autocomplete="current-password">
     </label>

@@ -48,16 +48,25 @@ themselves stay locked down.
 
 ## Threat model
 
+The state repo is **public** so the UI is one button — no PAT entry, no
+fields. Anonymous fetch returns the ciphertext, the passkey unlocks it,
+the GitHub PAT for writes lives inside the encrypted dict (as a regular
+secret named `GITHUB_PAT`).
+
 | Attacker has | Can they read secrets? |
 |---|---|
 | The static UI source (this repo) | No — it's just JavaScript |
-| The encrypted blob (vault-state repo) | No — needs the master passphrase |
-| The GitHub PAT | No — still needs the passphrase |
-| The master passphrase | No — still needs read access to vault-state |
-| Both PAT and passphrase | Yes — full vault read/write |
+| The encrypted blob (`vault-state/vault.json`) | Only if they brute-force the master passphrase against PBKDF2-SHA256 @ 100 000 iters |
+| A registered passkey | Only if it supports PRF *and* they have physical access *and* the AES-GCM blob |
+| The master passphrase | Yes — fetch ciphertext anonymously, decrypt locally |
 
-The PAT is fine-grained, scoped to exactly one repo
-(`vault-state`), with `Contents: read & write` and nothing else.
+The single security boundary is the master passphrase. With a strong one
+(16+ random chars), offline brute force is infeasible at PBKDF2 100k iters
+on commodity hardware.
+
+If you'd rather have a two-factor model — passphrase AND repo-access — flip
+`vault-state` back to private and stash the PAT in localStorage. The UI
+still works the same (it'll just send `Authorization: token` on the read).
 
 ## Decommissioned
 
