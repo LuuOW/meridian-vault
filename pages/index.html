@@ -1,0 +1,188 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1.0">
+<meta name="theme-color" content="#0a0d14">
+<meta http-equiv="Cache-Control" content="no-cache, no-store, must-revalidate">
+<meta http-equiv="Pragma" content="no-cache">
+<meta http-equiv="Expires" content="0">
+<title>Meridian Vault</title>
+<link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%230a0d14'/%3E%3Ccircle cx='32' cy='32' r='22' fill='none' stroke='%23a78bfa' stroke-width='3'/%3E%3Ccircle cx='32' cy='32' r='4' fill='%23fef3c7'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="./style.css">
+</head>
+<body>
+
+<header class="vh">
+  <h1>◎ Meridian Vault</h1>
+  <span class="vh-sub">vault.ask-meridian.uk</span>
+  <span id="authBadge" class="badge badge-muted">checking…</span>
+</header>
+
+<!-- ── First-time setup ─────────────────────────────────────────────── -->
+<section id="setup" class="card lock-card" hidden>
+  <div class="lock-icon">⚙️</div>
+  <h2>First-time setup</h2>
+  <p class="lead">Bootstrap the vault on this browser. After this, sign-in is passkey only.</p>
+
+  <ol class="setup-steps">
+    <li class="step" id="step1">
+      <h3>1. GitHub fine-grained PAT</h3>
+      <p class="hint">Repository access: <strong>Only select repositories → vault-state</strong>.<br>
+        Permissions: <strong>Contents: Read &amp; write</strong>. Nothing else.</p>
+      <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener" class="btn-link-out">create one →</a>
+      <label>PAT
+        <input id="setupPat" type="password" placeholder="github_pat_..." autocomplete="off" required>
+      </label>
+      <button id="setupPatNext" class="btn btn-primary btn-block">Validate &amp; continue</button>
+    </li>
+
+    <li class="step" id="step2" hidden>
+      <h3>2. Master passphrase</h3>
+      <p class="hint">Decrypts the vault locally. Never sent anywhere. Forgetting it makes the vault unrecoverable.</p>
+      <label>Passphrase
+        <input id="setupPassphrase" type="password" autocomplete="new-password" required minlength="16">
+      </label>
+      <button id="setupPassNext" class="btn btn-primary btn-block">Unlock vault</button>
+    </li>
+
+    <li class="step" id="step3" hidden>
+      <h3>3. Register your first passkey</h3>
+      <p class="hint">Touch ID, Windows Hello, YubiKey — anything that supports the <code>prf</code> extension. After this you'll never type the passphrase again.</p>
+      <label>Name this passkey
+        <input id="setupPasskeyName" type="text" placeholder="macbook touch id" required>
+      </label>
+      <button id="setupPasskeyBtn" class="btn btn-primary btn-block">🔑 Register passkey</button>
+      <p id="setupPasskeyErr" class="err" hidden></p>
+    </li>
+  </ol>
+  <p id="setupErr" class="err" hidden></p>
+</section>
+
+<!-- ── Lock screen — passkey only ───────────────────────────────────── -->
+<section id="lock" class="card lock-card" hidden>
+  <div class="lock-icon">🔒</div>
+  <h2>Unlock vault</h2>
+  <p class="lead">Sign in with a passkey. Your local one, or another device via QR / NFC / USB key.</p>
+
+  <button id="passkeyAuthBtn" type="button" class="btn btn-primary lock-passkey">
+    🔑 Sign in with passkey
+  </button>
+  <p id="passkeyAuthErr" class="err" hidden></p>
+
+  <details class="reset-details">
+    <summary>Lost all your passkeys?</summary>
+    <p class="hint">Enter your master passphrase. After unlocking, register a new passkey.</p>
+    <label>Master passphrase
+      <input id="lockPassphrase" type="password" autocomplete="current-password">
+    </label>
+    <button id="lockPassphraseBtn" type="button" class="btn-ghost btn-block">Unlock with passphrase</button>
+    <p id="lockPassphraseErr" class="err" hidden></p>
+  </details>
+</section>
+
+<!-- ── Authed view ──────────────────────────────────────────────────── -->
+<main id="vault" class="vault-grid" hidden>
+  <section class="card">
+    <header class="card-head">
+      <h2>Secrets</h2>
+      <button id="newBtn" class="btn-ghost btn-sm">+ new</button>
+    </header>
+    <ul id="secretsList" class="secrets-list">
+      <li class="empty">Loading…</li>
+    </ul>
+  </section>
+
+  <section class="card">
+    <header class="card-head">
+      <h2>Passkeys</h2>
+      <button id="addPasskeyBtn" class="btn-ghost btn-sm">+ register passkey</button>
+    </header>
+    <ul id="passkeysList" class="passkeys-list">
+      <li class="empty">Loading…</li>
+    </ul>
+    <p class="hint">Each passkey wraps the master passphrase via the WebAuthn <code>prf</code> extension.</p>
+
+    <header class="card-head" style="margin-top:18px">
+      <h2>SSH keys (CLI only)</h2>
+      <button id="addSshBtn" class="btn-ghost btn-sm">+ add SSH key</button>
+    </header>
+    <ul id="sshList" class="passkeys-list">
+      <li class="empty">Loading…</li>
+    </ul>
+    <p class="hint">Used by the <code>vault-cli</code> tool to authenticate fetches. The UI doesn't accept SSH login — passkeys only.</p>
+
+    <header class="card-head" style="margin-top:18px">
+      <h2>Session</h2>
+    </header>
+    <button id="rotatePatBtn" class="btn-ghost btn-block">Rotate GitHub PAT</button>
+    <button id="logoutBtn" class="btn-ghost btn-block">Log out</button>
+  </section>
+</main>
+
+<!-- ── Dialogs ──────────────────────────────────────────────────────── -->
+<dialog id="editDialog" class="dlg">
+  <form method="dialog" id="editForm">
+    <h3 id="editTitle">New secret</h3>
+    <label>Key
+      <input id="editKey" type="text" pattern="[A-Z][A-Z0-9_]{0,63}" required placeholder="MY_API_KEY">
+    </label>
+    <label>Value
+      <textarea id="editValue" rows="4" maxlength="8192" required></textarea>
+    </label>
+    <p id="editErr" class="err" hidden></p>
+    <div class="dlg-row">
+      <button value="cancel" class="btn-ghost">Cancel</button>
+      <button id="editSave" type="button" class="btn btn-primary">Save</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="viewDialog" class="dlg">
+  <form method="dialog">
+    <h3 id="viewTitle"></h3>
+    <pre id="viewValue" class="codebox"></pre>
+    <div class="dlg-row">
+      <button id="copyBtn" type="button" class="btn-ghost">Copy</button>
+      <button id="deleteBtn" type="button" class="btn btn-danger">Delete</button>
+      <button value="cancel" class="btn-ghost">Close</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="sshDialog" class="dlg">
+  <form method="dialog">
+    <h3>Add SSH key (CLI use)</h3>
+    <p class="lead" style="font-size:13px;color:var(--muted)">Ed25519 only. The CLI uses these for fetch authentication.</p>
+    <label>Name
+      <input id="sshName" type="text" placeholder="macbook" required>
+    </label>
+    <label>Public key
+      <textarea id="sshKey" rows="3" required placeholder="ssh-ed25519 AAAA… user@host"></textarea>
+    </label>
+    <p id="sshErr" class="err" hidden></p>
+    <div class="dlg-row">
+      <button value="cancel" class="btn-ghost">Cancel</button>
+      <button id="sshSave" type="button" class="btn btn-primary">Add</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="passphraseDialog" class="dlg">
+  <form method="dialog">
+    <h3>Master passphrase needed</h3>
+    <p class="lead" style="font-size:13px;color:var(--muted)" id="passphrasePrompt">Enter your master passphrase to wrap a new passkey.</p>
+    <label>Passphrase
+      <input id="passphraseInput" type="password" autocomplete="current-password" required>
+    </label>
+    <p id="passphraseErr" class="err" hidden></p>
+    <div class="dlg-row">
+      <button value="cancel" class="btn-ghost">Cancel</button>
+      <button id="passphraseOk" type="button" class="btn btn-primary">Continue</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="./app.js" defer></script>
+</body>
+</html>

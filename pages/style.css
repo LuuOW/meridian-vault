@@ -60,6 +60,31 @@ a { color: var(--accent); text-decoration: none; }
 .lock-icon { font-size: 36px; margin-bottom: 10px; }
 .lock-card h2 { margin: 0 0 6px; }
 .lock-passkey { width: 100%; margin: 14px 0 4px; font-size: 15px; padding: 12px; }
+.lock-passkey:disabled { opacity: 0.55; cursor: not-allowed; }
+
+.btn-block { width: 100%; }
+.btn-link-out {
+  display: inline-block; font-size: 12px; color: var(--accent);
+  text-decoration: none; margin: 6px 0 14px;
+}
+.btn-link-out:hover { text-decoration: underline; }
+
+.setup-steps { list-style: none; padding: 0; margin: 16px 0 0; text-align: left; }
+.setup-steps .step {
+  border: 1px solid var(--border);
+  border-radius: 10px; padding: 16px 18px; margin-bottom: 12px;
+}
+.setup-steps .step h3 { margin: 0 0 6px; font-size: 14px; letter-spacing: 0.02em; }
+.setup-steps .step .hint { margin: 0 0 10px; font-size: 12.5px; }
+
+.reset-details { margin-top: 22px; text-align: left; }
+.reset-details summary {
+  cursor: pointer; font-size: 12px; color: var(--text-muted);
+  padding: 6px 0; outline: none; user-select: none;
+}
+.reset-details summary:hover { color: var(--text); }
+.reset-details[open] summary { color: var(--text); }
+
 .lock-or {
   margin: 16px 0 12px; text-align: center; position: relative;
   color: var(--text-faint); font-size: 11px; letter-spacing: 0.18em;
