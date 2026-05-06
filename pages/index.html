@@ -29,6 +29,22 @@
   <p id="passkeyAuthErr" class="err" hidden></p>
 </section>
 
+<!-- ── Bootstrap — only shown when vault.json has zero passkeys ──────── -->
+<section id="bootstrap" class="card lock-card" hidden>
+  <div class="lock-icon">⚙️</div>
+  <h2>Set up vault</h2>
+  <p class="lead">No passkey is registered with this vault yet. Register one below — that's the only credential you'll ever need.</p>
+  <label>GitHub PAT (one-time, <code>repo</code> scope)
+    <input id="bootPat" type="password" placeholder="ghp_…" autocomplete="off" required>
+  </label>
+  <a href="https://github.com/settings/tokens/new?scopes=repo&amp;description=meridian-vault" target="_blank" rel="noopener" class="btn-link-out">→ Generate one (one click + copy)</a>
+  <button id="bootBtn" type="button" class="btn btn-primary lock-passkey">
+    🔑 Register first passkey
+  </button>
+  <p id="bootErr" class="err" hidden></p>
+  <p class="hint" style="margin-top:14px">A random 256-bit master key will be generated and wrapped under your passkey's <code>prf</code> output. There is no recovery if you lose all passkeys — by design.</p>
+</section>
+
 <!-- ── Authed view ──────────────────────────────────────────────────── -->
 <main id="vault" class="vault-grid" hidden>
   <section class="card">

@@ -18,8 +18,9 @@ const PRF_SALT_TEXT = 'vault.ask-meridian.uk:prf-v1'
 
 // ── DOM ────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id)
-const lock = $('lock'), vault = $('vault'), authBadge = $('authBadge')
+const lock = $('lock'), vault = $('vault'), bootstrap = $('bootstrap'), authBadge = $('authBadge')
 const passkeyAuthBtn = $('passkeyAuthBtn'), passkeyAuthErr = $('passkeyAuthErr')
+const bootPat = $('bootPat'), bootBtn = $('bootBtn'), bootErr = $('bootErr')
 
 const secretsList = $('secretsList'), passkeysList = $('passkeysList'), sshList = $('sshList')
 const newBtn = $('newBtn'), addPasskeyBtn = $('addPasskeyBtn'), addSshBtn = $('addSshBtn')
@@ -237,26 +238,106 @@ async function init() {
   authBadge.className = 'badge badge-muted'
   try {
     state.doc = await fetchState()
-    showLock()
+    if (!state.doc?.passkeys?.length) showBootstrap()
+    else showLock()
   } catch (e) {
     authBadge.textContent = 'offline'
     authBadge.className = 'badge badge-warn'
-    showLock()
+    showBootstrap()
     setTimeout(() => alert(`Failed to load vault: ${e.message}`), 0)
   }
 }
 
+function showBootstrap() {
+  bootstrap.hidden = false; lock.hidden = true; vault.hidden = true
+  authBadge.textContent = 'set-up'; authBadge.className = 'badge badge-warn'
+  bootPat?.focus()
+}
+
 function showLock() {
-  lock.hidden = false; vault.hidden = true
+  bootstrap.hidden = true; lock.hidden = false; vault.hidden = true
   authBadge.textContent = 'locked'; authBadge.className = 'badge badge-warn'
   passkeyAuthBtn.disabled = false
 }
 
 function showVault() {
-  lock.hidden = true; vault.hidden = false
+  bootstrap.hidden = true; lock.hidden = true; vault.hidden = false
   authBadge.textContent = 'authed'; authBadge.className = 'badge badge-ok'
   renderSecrets(); renderPasskeys(); renderSshKeys()
 }
+
+// ── Bootstrap (first passkey ever) ─────────────────────────────────────
+bootBtn?.addEventListener('click', async () => {
+  bootErr.hidden = true
+  const pat = bootPat.value.trim()
+  if (!pat) { bootErr.textContent = 'PAT required'; bootErr.hidden = false; return }
+  bootBtn.disabled = true
+  bootBtn.textContent = '⏳ encrypting fresh vault…'
+  try {
+    // Random 256-bit master key, b64u-encoded → used as the "passphrase" string
+    // that PBKDF2 derives the AES key from. Effectively unguessable.
+    const masterPass = bufToB64url(crypto.getRandomValues(new Uint8Array(32)))
+
+    // Encrypt empty secrets dict with the new master.
+    const blob = await aesEncrypt('{}', masterPass)
+
+    // Register passkey with PRF.
+    bootBtn.textContent = '⏳ touch authenticator…'
+    const cred = await navigator.credentials.create({ publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rp: { id: RP_ID, name: 'Meridian Vault' },
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'vault', displayName: 'Meridian Vault' },
+      pubKeyCredParams: [{ type:'public-key', alg:-7 }, { type:'public-key', alg:-8 }],
+      authenticatorSelection: { residentKey:'preferred', userVerification:'preferred' },
+      attestation: 'none', timeout: 60_000,
+      extensions: { prf: { eval: { first: prfSalt() } } },
+    }})
+    if (!cred) throw new Error('No credential')
+
+    // Extract PRF — Safari often emits only on .get().
+    let prf = cred.getClientExtensionResults?.()?.prf?.results?.first
+    if (!prf) {
+      bootBtn.textContent = '⏳ touch again to extract PRF…'
+      const g = await navigator.credentials.get({ publicKey: {
+        challenge: crypto.getRandomValues(new Uint8Array(32)),
+        rpId: RP_ID, timeout: 60_000,
+        allowCredentials: [{ type:'public-key', id: cred.rawId }],
+        userVerification: 'preferred',
+        extensions: { prf: { eval: { first: prfSalt() } } },
+      }})
+      prf = g?.getClientExtensionResults?.()?.prf?.results?.first
+      if (!prf) throw new Error('Authenticator does not support the PRF extension')
+    }
+
+    // Wrap master key under PRF.
+    const wrapped = await rawAesEncrypt(masterPass, new Uint8Array(prf))
+
+    // Commit fresh vault.json — overwrites any existing (unrecoverable) blob.
+    const newDoc = {
+      version: 1, vault: blob,
+      passkeys: [{
+        credentialId: bufToB64url(cred.rawId),
+        name: 'first passkey', alg: 'ES256/EdDSA',
+        prf_wrapped_passphrase: wrapped,
+        createdAt: new Date().toISOString(),
+      }],
+      ssh_keys: [],
+    }
+    bootBtn.textContent = '⏳ committing to GitHub…'
+    state.pat = pat
+    state.remoteSha = null
+    await commitState(newDoc, 'vault: bootstrap with first passkey')
+
+    bootBtn.textContent = '✓ done — reloading…'
+    setTimeout(() => location.reload(), 800)
+  } catch (e) {
+    console.error(e)
+    bootErr.textContent = e.message || String(e)
+    bootErr.hidden = false
+    bootBtn.disabled = false
+    bootBtn.textContent = '🔑 Register first passkey'
+  }
+})
 
 // ── The button ─────────────────────────────────────────────────────────
 passkeyAuthBtn.addEventListener('click', async () => {
