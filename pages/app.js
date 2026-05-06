@@ -309,16 +309,16 @@ async function init() {
       // Repo file is missing or empty — treat as fresh setup.
       return showSetup({ patAlreadySet: true })
     }
-    if (!doc.passkeys?.length) {
-      // No passkeys registered — user must enter passphrase to bootstrap one.
-      return showLock({ noPasskeys: true })
-    }
+    // Always go to lock screen if we have a vault doc — never disable the
+    // passkey button. WebAuthn .get() with allowCredentials omitted shows
+    // the native picker (Touch ID + USB key + NFC + QR cross-device) even
+    // when nothing's registered locally for this origin.
     return showLock()
   } catch (e) {
     authBadge.textContent = 'offline'
     authBadge.className = 'badge badge-warn'
     alert(`Failed to load vault state: ${e.message}\n\nIf the PAT is wrong, click "Rotate GitHub PAT" inside the vault — or open dev tools and clear localStorage.`)
-    showLock({ noPasskeys: true })
+    showLock()
   }
 }
 
@@ -334,19 +334,12 @@ function showSetup({ patAlreadySet = false } = {}) {
   }
 }
 
-function showLock({ noPasskeys = false } = {}) {
+function showLock() {
   setup.hidden = true; lock.hidden = false; vault.hidden = true
-  authBadge.textContent = noPasskeys ? 'no passkeys' : 'locked'
+  authBadge.textContent = 'locked'
   authBadge.className = 'badge badge-warn'
-  if (noPasskeys) {
-    passkeyAuthBtn.disabled = true
-    passkeyAuthBtn.textContent = '🔑 No passkeys yet — use passphrase below'
-    // Auto-open the fallback details so the user sees the passphrase field.
-    document.querySelector('.reset-details')?.setAttribute('open', '')
-  } else {
-    passkeyAuthBtn.disabled = false
-    passkeyAuthBtn.textContent = '🔑 Sign in with passkey'
-  }
+  passkeyAuthBtn.disabled = false
+  passkeyAuthBtn.textContent = '🔑 Sign in with passkey'
 }
 
 function showVault() {

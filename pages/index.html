@@ -27,14 +27,18 @@
 
   <ol class="setup-steps">
     <li class="step" id="step1">
-      <h3>1. GitHub fine-grained PAT</h3>
-      <p class="hint">Repository access: <strong>Only select repositories → vault-state</strong>.<br>
-        Permissions: <strong>Contents: Read &amp; write</strong>. Nothing else.</p>
-      <a href="https://github.com/settings/personal-access-tokens/new" target="_blank" rel="noopener" class="btn-link-out">create one →</a>
-      <label>PAT
-        <input id="setupPat" type="password" placeholder="github_pat_..." autocomplete="off" required>
+      <h3>1. Vault access key</h3>
+      <p class="hint">A small GitHub access key that lets this page read &amp; write
+        your encrypted vault file (in the private <code>LuuOW/vault-state</code> repo).
+        Stored only on this device.</p>
+      <a href="https://github.com/settings/tokens/new?scopes=repo&amp;description=meridian-vault" target="_blank" rel="noopener" class="btn-link-out">→ Generate one on github.com (one click + copy)</a>
+      <label>Paste it here
+        <input id="setupPat" type="password" placeholder="ghp_… or github_pat_…" autocomplete="off" required>
       </label>
       <button id="setupPatNext" class="btn btn-primary btn-block">Validate &amp; continue</button>
+      <p class="hint" style="margin-top:10px">
+        <strong>Already have one?</strong> Any GitHub PAT with <code>repo</code> scope works.
+      </p>
     </li>
 
     <li class="step" id="step2" hidden>
