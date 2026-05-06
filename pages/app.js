@@ -1,20 +1,15 @@
 // vault.ask-meridian.uk — pure-client GitHub-Pages vault.
 //
-// One button: "Sign in with passkey." That's the entire UX.
+// State lives in a private GitHub repo (LuuOW/vault-state) as one
+// vault.json file. Reads/writes go through the GitHub Contents API
+// using a PAT (entered once at first-time setup, then cached in
+// localStorage on this device). All crypto is local: AES-256-GCM with
+// a key derived from a master passphrase via PBKDF2-SHA256.
 //
-// Architecture:
-//   - State repo (LuuOW/vault-state) is public. The encrypted blob is
-//     useless without the master passphrase, which is wrapped under
-//     each registered passkey via the WebAuthn `prf` extension. Anonymous
-//     fetch of vault.json is fine — the ciphertext alone reveals nothing.
-//   - The GitHub PAT used for writes lives INSIDE the encrypted vault as
-//     a regular secret (`GITHUB_PAT`). It only becomes available after a
-//     successful passkey unlock. The user never sees a PAT field.
-//   - WebAuthn .get() is invoked WITHOUT allowCredentials, so the browser
-//     shows the native picker (local Touch ID + USB key + NFC + QR code
-//     for cross-device hybrid transport).
-//
-// Storage in this browser: nothing persistent. Everything is in memory.
+// UI auth = passkey only. WebAuthn .get() is called WITHOUT
+// allowCredentials, so the native picker shows local Touch ID + USB
+// security key + NFC + QR code for cross-device hybrid transport. Each
+// passkey wraps the master passphrase under its prf-extension output.
 
 const STATE_OWNER = 'LuuOW'
 const STATE_REPO  = 'vault-state'
@@ -44,13 +39,14 @@ const editDialog = $('editDialog'), editKey = $('editKey'), editValue = $('editV
 const viewDialog = $('viewDialog'), viewTitle = $('viewTitle'), viewValue = $('viewValue'), copyBtn = $('copyBtn'), deleteBtn = $('deleteBtn')
 const sshDialog = $('sshDialog'), sshName = $('sshName'), sshKey = $('sshKey'), sshSave = $('sshSave'), sshErr = $('sshErr')
 
-// In-memory only. Nothing persists across reload.
+// PAT lives in localStorage on this device (entered at first-time setup).
+// Master passphrase + decrypted secrets are in memory only.
 let state = {
-  pat: null,          // GitHub PAT, extracted from decrypted secrets at unlock time
-  passphrase: null,   // master passphrase, in memory after unlock
-  remoteSha: null,    // sha of vault.json at last fetch (for write concurrency)
-  doc: null,          // parsed state file
-  secrets: null,      // decrypted secrets dict
+  pat: null,
+  passphrase: null,
+  remoteSha: null,
+  doc: null,
+  secrets: null,
   currentEdit: null, currentView: null,
 }
 
@@ -145,49 +141,47 @@ async function rawAesDecrypt(blob, rawKey32) {
   return new TextDecoder().decode(pt)
 }
 
-// ── GitHub Contents API ────────────────────────────────────────────────
-// Anonymous read (public repo). Authenticated write (PAT decrypted from vault).
-async function fetchStateAnon() {
-  const url = `https://api.github.com/repos/${STATE_OWNER}/${STATE_REPO}/contents/${STATE_PATH}?_=${Date.now()}`
-  const res = await fetch(url, {
-    headers: { 'Accept': 'application/vnd.github+json' },
+// ── GitHub Contents API (authenticated with the device-local PAT) ─────
+async function gh(method, path, body) {
+  if (!state.pat) throw new Error('No PAT — first-time setup needed')
+  const url = `https://api.github.com/repos/${STATE_OWNER}/${STATE_REPO}/${path}`
+  const opts = {
+    method,
+    headers: {
+      'Authorization': 'token ' + state.pat,
+      'Accept': 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
     cache: 'no-store',
-  })
-  if (res.status === 404) return { remoteSha: null, doc: null }
-  if (!res.ok) throw new Error(`fetch state: HTTP ${res.status}`)
-  const data = await res.json()
-  const doc = JSON.parse(atob(data.content.replace(/\n/g, '')))
-  return { remoteSha: data.sha, doc }
+  }
+  if (body) {
+    opts.headers['Content-Type'] = 'application/json'
+    opts.body = JSON.stringify(body)
+  }
+  const res = await fetch(url, opts)
+  if (res.status === 404) return { __notFound: true }
+  let data = null
+  try { data = await res.json() } catch {}
+  if (!res.ok) throw new Error(`GitHub ${method} ${res.status}: ${data?.message || res.statusText}`)
+  return data
+}
+
+async function fetchState() {
+  const res = await gh('GET', `contents/${STATE_PATH}?_=${Date.now()}`)
+  if (res.__notFound) return { remoteSha: null, doc: null }
+  const doc = JSON.parse(atob(res.content.replace(/\n/g, '')))
+  return { remoteSha: res.sha, doc }
 }
 
 async function commitState(doc, message) {
-  if (!state.pat) throw new Error('Vault not unlocked — no PAT in memory')
   // Refresh sha to avoid 409 conflicts.
-  const headRes = await fetch(`https://api.github.com/repos/${STATE_OWNER}/${STATE_REPO}/contents/${STATE_PATH}?_=${Date.now()}`, {
-    headers: {
-      'Authorization': 'token ' + state.pat,
-      'Accept': 'application/vnd.github+json',
-    },
-    cache: 'no-store',
-  })
-  if (headRes.ok) state.remoteSha = (await headRes.json()).sha
-
+  const fresh = await fetchState()
+  state.remoteSha = fresh.remoteSha
   const content = btoa(unescape(encodeURIComponent(JSON.stringify(doc, null, 2))))
   const body = { message, content }
   if (state.remoteSha) body.sha = state.remoteSha
-  const res = await fetch(`https://api.github.com/repos/${STATE_OWNER}/${STATE_REPO}/contents/${STATE_PATH}`, {
-    method: 'PUT',
-    headers: {
-      'Authorization': 'token ' + state.pat,
-      'Accept': 'application/vnd.github+json',
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(body),
-  })
-  let data = null
-  try { data = await res.json() } catch {}
-  if (!res.ok) throw new Error(`commit: HTTP ${res.status}: ${data?.message || res.statusText}`)
-  state.remoteSha = data.content?.sha || data.sha
+  const res = await gh('PUT', `contents/${STATE_PATH}`, body)
+  state.remoteSha = res.content?.sha || res.sha
   state.doc = doc
 }
 
@@ -274,20 +268,15 @@ async function signInWithPasskey() {
 
 // ── State machine ──────────────────────────────────────────────────────
 async function init() {
+  state.pat = localStorage.getItem('vault.pat')
+  if (!state.pat) return showSetup()
   authBadge.textContent = 'fetching state…'
   authBadge.className = 'badge badge-muted'
   try {
-    const { remoteSha, doc } = await fetchStateAnon()
+    const { remoteSha, doc } = await fetchState()
     state.remoteSha = remoteSha
     state.doc = doc
-    if (!doc || !doc.vault?.ct) {
-      // No vault yet — fresh user setup.
-      return showSetup()
-    }
-    // Vault exists. Show the lock screen with one button. Even if no
-    // passkeys are registered for this origin, the WebAuthn picker still
-    // surfaces QR/USB/NFC paths, and the passphrase fallback is hidden
-    // under a "..." disclosure for users who lose all their passkeys.
+    if (!doc || !doc.vault?.ct) return showSetup({ patAlreadySet: true })
     return showLock()
   } catch (e) {
     authBadge.textContent = 'offline'
@@ -297,11 +286,16 @@ async function init() {
   }
 }
 
-function showSetup() {
+function showSetup({ patAlreadySet = false } = {}) {
   setup.hidden = false; lock.hidden = true; vault.hidden = true
   authBadge.textContent = 'setup'; authBadge.className = 'badge badge-warn'
-  step1.hidden = false; step2.hidden = true; step3.hidden = true
-  setupPat?.focus()
+  if (patAlreadySet) {
+    step1.hidden = true; step2.hidden = false; step3.hidden = true
+    setupPassphrase?.focus()
+  } else {
+    step1.hidden = false; step2.hidden = true; step3.hidden = true
+    setupPat?.focus()
+  }
 }
 function showLock() {
   setup.hidden = true; lock.hidden = false; vault.hidden = true
@@ -347,13 +341,6 @@ async function unlockWithPassphrase(passphrase) {
   const pt = await aesDecrypt(state.doc.vault, passphrase)
   state.secrets = JSON.parse(pt)
   state.passphrase = passphrase
-  // The PAT lives inside the vault. After unlock, all writes use it.
-  state.pat = state.secrets.GITHUB_PAT
-  if (!state.pat) {
-    // Vault has no GITHUB_PAT yet — UI will be read-only until the user
-    // adds one as a regular secret.
-    console.warn('No GITHUB_PAT in vault; writes disabled until you add one.')
-  }
   showVault()
 }
 
@@ -516,17 +503,19 @@ setupPatNext?.addEventListener('click', async () => {
   setupErr.hidden = true
   const pat = setupPat.value.trim()
   if (!pat) return
+  state.pat = pat
   try {
-    const res = await fetch(`https://api.github.com/repos/${STATE_OWNER}/${STATE_REPO}`, {
-      headers: { 'Authorization': 'token ' + pat, 'Accept': 'application/vnd.github+json' },
-    })
-    if (!res.ok) throw new Error(`PAT validation failed (HTTP ${res.status}). Make sure the token has \`repo\` scope.`)
-    state.pat = pat
+    const { remoteSha, doc } = await fetchState()
+    state.remoteSha = remoteSha
+    state.doc = doc
+    localStorage.setItem('vault.pat', pat)
     setupPat.value = ''
     step1.hidden = true; step2.hidden = false
     setupPassphrase.focus()
   } catch (e) {
-    setupErr.textContent = e.message; setupErr.hidden = false
+    state.pat = null
+    setupErr.textContent = `PAT validation failed: ${e.message}`
+    setupErr.hidden = false
   }
 })
 
@@ -536,12 +525,24 @@ setupPassNext?.addEventListener('click', async () => {
   if (passphrase.length < 16) {
     setupErr.textContent = 'passphrase must be ≥16 chars'; setupErr.hidden = false; return
   }
-  state.secrets = { GITHUB_PAT: state.pat }   // PAT becomes a regular secret
-  state.passphrase = passphrase
-  const blob = await aesEncrypt(JSON.stringify(state.secrets), passphrase)
-  state.doc = { version: 1, vault: blob, passkeys: [], ssh_keys: [] }
-  try { await commitState(state.doc, 'vault: initial encryption') }
-  catch (e) { setupErr.textContent = e.message; setupErr.hidden = false; return }
+  if (state.doc?.vault?.ct) {
+    // Existing vault — verify passphrase decrypts.
+    try {
+      const pt = await aesDecrypt(state.doc.vault, passphrase)
+      state.secrets = JSON.parse(pt)
+      state.passphrase = passphrase
+    } catch {
+      setupErr.textContent = 'passphrase did not decrypt the existing vault'; setupErr.hidden = false; return
+    }
+  } else {
+    // Fresh vault — initialise.
+    state.secrets = {}
+    state.passphrase = passphrase
+    const blob = await aesEncrypt(JSON.stringify(state.secrets), passphrase)
+    state.doc = { version: 1, vault: blob, passkeys: [], ssh_keys: [] }
+    try { await commitState(state.doc, 'vault: initial encryption') }
+    catch (e) { setupErr.textContent = e.message; setupErr.hidden = false; return }
+  }
   setupPassphrase.value = ''
   step2.hidden = true; step3.hidden = false
   setupPasskeyName.focus()
@@ -569,18 +570,17 @@ setupPasskeyBtn?.addEventListener('click', async () => {
 
 // ── Session controls ───────────────────────────────────────────────────
 logoutBtn?.addEventListener('click', () => {
-  state.passphrase = null; state.secrets = null; state.pat = null
+  state.passphrase = null; state.secrets = null
   showLock()
 })
 
-rotatePatBtn?.addEventListener('click', async () => {
-  const next = prompt('New GitHub PAT (will replace GITHUB_PAT in the vault):')
+rotatePatBtn?.addEventListener('click', () => {
+  const next = prompt('New GitHub PAT for this device (cached in localStorage):')
   if (!next) return
-  state.secrets.GITHUB_PAT = next.trim()
+  localStorage.setItem('vault.pat', next.trim())
   state.pat = next.trim()
-  try { await persistVault('rotate GITHUB_PAT') }
-  catch (e) { alert('Rotate failed: ' + e.message); return }
-  alert('PAT rotated.')
+  alert('PAT rotated. Reloading.')
+  location.reload()
 })
 
 // ── Utils ──────────────────────────────────────────────────────────────
