@@ -19,69 +19,14 @@
   <span id="authBadge" class="badge badge-muted">checking…</span>
 </header>
 
-<!-- ── First-time setup ─────────────────────────────────────────────── -->
-<section id="setup" class="card lock-card" hidden>
-  <div class="lock-icon">⚙️</div>
-  <h2>First-time setup</h2>
-  <p class="lead">Bootstrap the vault on this browser. After this, sign-in is passkey only.</p>
-
-  <ol class="setup-steps">
-    <li class="step" id="step1">
-      <h3>1. Vault access key</h3>
-      <p class="hint">A small GitHub access key that lets this page read &amp; write
-        your encrypted vault file (in the private <code>LuuOW/vault-state</code> repo).
-        Stored only on this device.</p>
-      <a href="https://github.com/settings/tokens/new?scopes=repo&amp;description=meridian-vault" target="_blank" rel="noopener" class="btn-link-out">→ Generate one on github.com (one click + copy)</a>
-      <label>Paste it here
-        <input id="setupPat" type="password" placeholder="ghp_… or github_pat_…" autocomplete="off" required>
-      </label>
-      <button id="setupPatNext" class="btn btn-primary btn-block">Validate &amp; continue</button>
-      <p class="hint" style="margin-top:10px">
-        <strong>Already have one?</strong> Any GitHub PAT with <code>repo</code> scope works.
-      </p>
-    </li>
-
-    <li class="step" id="step2" hidden>
-      <h3>2. Master passphrase</h3>
-      <p class="hint">Decrypts the vault locally. Never sent anywhere. Forgetting it makes the vault unrecoverable.</p>
-      <label>Passphrase
-        <input id="setupPassphrase" type="password" autocomplete="new-password" required minlength="16">
-      </label>
-      <button id="setupPassNext" class="btn btn-primary btn-block">Unlock vault</button>
-    </li>
-
-    <li class="step" id="step3" hidden>
-      <h3>3. Register your first passkey</h3>
-      <p class="hint">Touch ID, Windows Hello, YubiKey — anything that supports the <code>prf</code> extension. After this you'll never type the passphrase again.</p>
-      <label>Name this passkey
-        <input id="setupPasskeyName" type="text" placeholder="macbook touch id" required>
-      </label>
-      <button id="setupPasskeyBtn" class="btn btn-primary btn-block">🔑 Register passkey</button>
-      <p id="setupPasskeyErr" class="err" hidden></p>
-    </li>
-  </ol>
-  <p id="setupErr" class="err" hidden></p>
-</section>
-
-<!-- ── Lock screen — single button ──────────────────────────────────── -->
+<!-- ── Auth screen — one button ─────────────────────────────────────── -->
 <section id="lock" class="card lock-card" hidden>
   <div class="lock-icon">🔒</div>
   <h2>Meridian Vault</h2>
-
   <button id="passkeyAuthBtn" type="button" class="btn btn-primary lock-passkey">
     🔑 Sign in with passkey
   </button>
   <p id="passkeyAuthErr" class="err" hidden></p>
-
-  <details class="reset-details">
-    <summary>·</summary>
-    <p class="hint">Lost every passkey? Recover with the master passphrase.</p>
-    <label>Master passphrase
-      <input id="lockPassphrase" type="password" autocomplete="current-password">
-    </label>
-    <button id="lockPassphraseBtn" type="button" class="btn-ghost btn-block">Unlock with passphrase</button>
-    <p id="lockPassphraseErr" class="err" hidden></p>
-  </details>
 </section>
 
 <!-- ── Authed view ──────────────────────────────────────────────────── -->

@@ -1,35 +1,25 @@
-// vault.ask-meridian.uk — pure-client GitHub-Pages vault.
+// vault.ask-meridian.uk — auth screen is one button.
 //
-// State lives in a private GitHub repo (LuuOW/vault-state) as one
-// vault.json file. Reads/writes go through the GitHub Contents API
-// using a PAT (entered once at first-time setup, then cached in
-// localStorage on this device). All crypto is local: AES-256-GCM with
-// a key derived from a master passphrase via PBKDF2-SHA256.
+// The page fetches its own encrypted blob (./vault.json, same origin,
+// anonymous) on load. The user clicks "Sign in with passkey." The browser
+// shows the OS-native passkey picker — local platform passkey, USB
+// security key, NFC, QR for cross-device. If none resolves, the OS itself
+// shows "no passkey available" and the auth attempt simply fails.
 //
-// UI auth = passkey only. WebAuthn .get() is called WITHOUT
-// allowCredentials, so the native picker shows local Touch ID + USB
-// security key + NFC + QR code for cross-device hybrid transport. Each
-// passkey wraps the master passphrase under its prf-extension output.
+// On successful unlock: the PRF extension output decrypts the master
+// passphrase, which decrypts the vault. The GitHub PAT for writes lives
+// inside the vault as a regular secret (GITHUB_PAT). Registration of new
+// passkeys happens only AFTER auth, from inside the authed view.
 
-const STATE_OWNER = 'LuuOW'
-const STATE_REPO  = 'vault-state'
-const STATE_PATH  = 'vault.json'
+const VAULT_URL = './vault.json'   // served by GitHub Pages alongside this page
 const PBKDF2_ITERS = 100_000
-const RP_ID = location.hostname  // vault.ask-meridian.uk in prod
+const RP_ID = location.hostname
+const PRF_SALT_TEXT = 'vault.ask-meridian.uk:prf-v1'
 
 // ── DOM ────────────────────────────────────────────────────────────────
 const $ = id => document.getElementById(id)
-const setup = $('setup'), lock = $('lock'), vault = $('vault')
-const authBadge = $('authBadge')
-
-const setupPassphrase = $('setupPassphrase'), setupPassNext = $('setupPassNext')
-const setupPasskeyName = $('setupPasskeyName'), setupPasskeyBtn = $('setupPasskeyBtn')
-const setupPat = $('setupPat'), setupPatNext = $('setupPatNext')
-const setupErr = $('setupErr'), setupPasskeyErr = $('setupPasskeyErr')
-const step1 = $('step1'), step2 = $('step2'), step3 = $('step3')
-
+const lock = $('lock'), vault = $('vault'), authBadge = $('authBadge')
 const passkeyAuthBtn = $('passkeyAuthBtn'), passkeyAuthErr = $('passkeyAuthErr')
-const lockPassphrase = $('lockPassphrase'), lockPassphraseBtn = $('lockPassphraseBtn'), lockPassphraseErr = $('lockPassphraseErr')
 
 const secretsList = $('secretsList'), passkeysList = $('passkeysList'), sshList = $('sshList')
 const newBtn = $('newBtn'), addPasskeyBtn = $('addPasskeyBtn'), addSshBtn = $('addSshBtn')
@@ -39,18 +29,12 @@ const editDialog = $('editDialog'), editKey = $('editKey'), editValue = $('editV
 const viewDialog = $('viewDialog'), viewTitle = $('viewTitle'), viewValue = $('viewValue'), copyBtn = $('copyBtn'), deleteBtn = $('deleteBtn')
 const sshDialog = $('sshDialog'), sshName = $('sshName'), sshKey = $('sshKey'), sshSave = $('sshSave'), sshErr = $('sshErr')
 
-// PAT lives in localStorage on this device (entered at first-time setup).
-// Master passphrase + decrypted secrets are in memory only.
 let state = {
-  pat: null,
-  passphrase: null,
-  remoteSha: null,
-  doc: null,
-  secrets: null,
+  pat: null, passphrase: null, doc: null, secrets: null, remoteSha: null,
   currentEdit: null, currentView: null,
 }
 
-// ── b64 ────────────────────────────────────────────────────────────────
+// ── b64 helpers ────────────────────────────────────────────────────────
 function b64urlToBuf(s) {
   s = s.replace(/-/g, '+').replace(/_/g, '/')
   while (s.length % 4) s += '='
@@ -141,81 +125,90 @@ async function rawAesDecrypt(blob, rawKey32) {
   return new TextDecoder().decode(pt)
 }
 
-// ── GitHub Contents API (authenticated with the device-local PAT) ─────
-async function gh(method, path, body) {
-  if (!state.pat) throw new Error('No PAT — first-time setup needed')
-  const url = `https://api.github.com/repos/${STATE_OWNER}/${STATE_REPO}/${path}`
-  const opts = {
-    method,
-    headers: {
-      'Authorization': 'token ' + state.pat,
-      'Accept': 'application/vnd.github+json',
-      'X-GitHub-Api-Version': '2022-11-28',
-    },
-    cache: 'no-store',
-  }
-  if (body) {
-    opts.headers['Content-Type'] = 'application/json'
-    opts.body = JSON.stringify(body)
-  }
-  const res = await fetch(url, opts)
-  if (res.status === 404) return { __notFound: true }
-  let data = null
-  try { data = await res.json() } catch {}
-  if (!res.ok) throw new Error(`GitHub ${method} ${res.status}: ${data?.message || res.statusText}`)
-  return data
-}
-
+// ── State fetch (anonymous, same-origin) and write (PAT from secrets) ──
 async function fetchState() {
-  const res = await gh('GET', `contents/${STATE_PATH}?_=${Date.now()}`)
-  if (res.__notFound) return { remoteSha: null, doc: null }
-  const doc = JSON.parse(atob(res.content.replace(/\n/g, '')))
-  return { remoteSha: res.sha, doc }
+  const res = await fetch(`${VAULT_URL}?_=${Date.now()}`, { cache: 'no-store' })
+  if (!res.ok) throw new Error(`fetch vault.json: HTTP ${res.status}`)
+  return await res.json()
 }
 
 async function commitState(doc, message) {
+  if (!state.pat) throw new Error('No GITHUB_PAT in vault — add one to enable writes')
   // Refresh sha to avoid 409 conflicts.
-  const fresh = await fetchState()
-  state.remoteSha = fresh.remoteSha
+  const headRes = await fetch(`https://api.github.com/repos/LuuOW/meridian-vault/contents/pages/vault.json?_=${Date.now()}`, {
+    headers: { 'Authorization': 'token ' + state.pat, 'Accept': 'application/vnd.github+json' },
+    cache: 'no-store',
+  })
+  if (headRes.ok) state.remoteSha = (await headRes.json()).sha
+
   const content = btoa(unescape(encodeURIComponent(JSON.stringify(doc, null, 2))))
   const body = { message, content }
   if (state.remoteSha) body.sha = state.remoteSha
-  const res = await gh('PUT', `contents/${STATE_PATH}`, body)
-  state.remoteSha = res.content?.sha || res.sha
+  const res = await fetch('https://api.github.com/repos/LuuOW/meridian-vault/contents/pages/vault.json', {
+    method: 'PUT',
+    headers: {
+      'Authorization': 'token ' + state.pat,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(body),
+  })
+  let data = null
+  try { data = await res.json() } catch {}
+  if (!res.ok) throw new Error(`commit: HTTP ${res.status}: ${data?.message || res.statusText}`)
+  state.remoteSha = data.content?.sha || data.sha
   state.doc = doc
 }
 
 // ── WebAuthn ───────────────────────────────────────────────────────────
-function webauthnSupported() { return !!(window.PublicKeyCredential && navigator.credentials) }
+function prfSalt() {
+  const s = new Uint8Array(32)
+  s.set(new TextEncoder().encode(PRF_SALT_TEXT))
+  return s
+}
+
+async function signInWithPasskey() {
+  // No allowCredentials — OS-native picker shows local + USB + NFC + QR.
+  const cred = await navigator.credentials.get({
+    publicKey: {
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
+      rpId: RP_ID,
+      timeout: 60_000,
+      userVerification: 'preferred',
+      extensions: { prf: { eval: { first: prfSalt() } } },
+    },
+  })
+  if (!cred) throw new Error('No credential returned')
+
+  const prfOutput = cred.getClientExtensionResults?.()?.prf?.results?.first
+  if (!prfOutput) throw new Error('Authenticator did not return a PRF result')
+
+  const credentialId = bufToB64url(cred.rawId)
+  const wrap = (state.doc?.passkeys || []).find(p => p.credentialId === credentialId)
+  if (!wrap) throw new Error('This passkey is not registered with this vault')
+
+  return await rawAesDecrypt(wrap.prf_wrapped_passphrase, new Uint8Array(prfOutput))
+}
 
 async function registerPasskey(name) {
-  const challenge = crypto.getRandomValues(new Uint8Array(32))
-  const userId    = crypto.getRandomValues(new Uint8Array(16))
-  const prfSalt   = new TextEncoder().encode('vault.ask-meridian.uk:prf-v1').slice(0, 32)
-  // pad to 32 bytes
-  const salt32 = new Uint8Array(32); salt32.set(prfSalt)
-
   const cred = await navigator.credentials.create({
     publicKey: {
-      challenge,
+      challenge: crypto.getRandomValues(new Uint8Array(32)),
       rp:   { id: RP_ID, name: 'Meridian Vault' },
-      user: { id: userId, name: 'vault', displayName: 'Meridian Vault' },
-      pubKeyCredParams: [
-        { type: 'public-key', alg: -7 },
-        { type: 'public-key', alg: -8 },
-      ],
+      user: { id: crypto.getRandomValues(new Uint8Array(16)), name: 'vault', displayName: 'Meridian Vault' },
+      pubKeyCredParams: [{ type: 'public-key', alg: -7 }, { type: 'public-key', alg: -8 }],
       authenticatorSelection: { residentKey: 'preferred', userVerification: 'preferred' },
       attestation: 'none',
       timeout: 60_000,
-      extensions: { prf: { eval: { first: salt32 } } },
+      extensions: { prf: { eval: { first: prfSalt() } } },
     },
   })
   if (!cred) throw new Error('No credential returned')
 
   let prfOutput = cred.getClientExtensionResults?.()?.prf?.results?.first
   if (!prfOutput) {
-    // Many platforms expose PRF only on .get(), not .create(). Do a fresh
-    // .get() right away to extract it.
+    // Some authenticators (notably iCloud Keychain via Safari) only expose
+    // PRF on .get(). Do an immediate .get() to extract it.
     const getCred = await navigator.credentials.get({
       publicKey: {
         challenge: crypto.getRandomValues(new Uint8Array(32)),
@@ -223,61 +216,28 @@ async function registerPasskey(name) {
         timeout: 60_000,
         allowCredentials: [{ type: 'public-key', id: cred.rawId }],
         userVerification: 'preferred',
-        extensions: { prf: { eval: { first: salt32 } } },
+        extensions: { prf: { eval: { first: prfSalt() } } },
       },
     })
     prfOutput = getCred?.getClientExtensionResults?.()?.prf?.results?.first
-    if (!prfOutput) throw new Error("This authenticator doesn't support the PRF extension. Try Touch ID, Windows Hello, or a YubiKey 5+.")
+    if (!prfOutput) throw new Error('Authenticator does not support the PRF extension')
   }
 
   return {
     credentialId: bufToB64url(cred.rawId),
-    name,
-    alg: 'ES256/EdDSA',
-    prfSalt: bufToB64url(salt32),
+    name, alg: 'ES256/EdDSA',
     prfOutput: new Uint8Array(prfOutput),
     createdAt: new Date().toISOString(),
   }
 }
 
-async function signInWithPasskey() {
-  const challenge = crypto.getRandomValues(new Uint8Array(32))
-  const salt32 = new Uint8Array(32)
-  salt32.set(new TextEncoder().encode('vault.ask-meridian.uk:prf-v1'))
-
-  // allowCredentials INTENTIONALLY omitted — gives the user the full native
-  // picker (local Touch ID, USB key, NFC, QR for cross-device).
-  const cred = await navigator.credentials.get({
-    publicKey: {
-      challenge, rpId: RP_ID, timeout: 60_000,
-      userVerification: 'preferred',
-      extensions: { prf: { eval: { first: salt32 } } },
-    },
-  })
-  if (!cred) throw new Error('No credential returned')
-
-  const prfOutput = cred.getClientExtensionResults?.()?.prf?.results?.first
-  if (!prfOutput) throw new Error("Authenticator returned no PRF result. Use a passkey that supports the PRF extension.")
-
-  const credentialId = bufToB64url(cred.rawId)
-  const wrap = (state.doc?.passkeys || []).find(p => p.credentialId === credentialId)
-  if (!wrap) throw new Error('This passkey is not registered with this vault. Use a registered one, or fall back to the master passphrase.')
-
-  return await rawAesDecrypt(wrap.prf_wrapped_passphrase, new Uint8Array(prfOutput))
-}
-
 // ── State machine ──────────────────────────────────────────────────────
 async function init() {
-  state.pat = localStorage.getItem('vault.pat')
-  if (!state.pat) return showSetup()
-  authBadge.textContent = 'fetching state…'
+  authBadge.textContent = 'fetching…'
   authBadge.className = 'badge badge-muted'
   try {
-    const { remoteSha, doc } = await fetchState()
-    state.remoteSha = remoteSha
-    state.doc = doc
-    if (!doc || !doc.vault?.ct) return showSetup({ patAlreadySet: true })
-    return showLock()
+    state.doc = await fetchState()
+    showLock()
   } catch (e) {
     authBadge.textContent = 'offline'
     authBadge.className = 'badge badge-warn'
@@ -286,65 +246,40 @@ async function init() {
   }
 }
 
-function showSetup({ patAlreadySet = false } = {}) {
-  setup.hidden = false; lock.hidden = true; vault.hidden = true
-  authBadge.textContent = 'setup'; authBadge.className = 'badge badge-warn'
-  if (patAlreadySet) {
-    step1.hidden = true; step2.hidden = false; step3.hidden = true
-    setupPassphrase?.focus()
-  } else {
-    step1.hidden = false; step2.hidden = true; step3.hidden = true
-    setupPat?.focus()
-  }
-}
 function showLock() {
-  setup.hidden = true; lock.hidden = false; vault.hidden = true
+  lock.hidden = false; vault.hidden = true
   authBadge.textContent = 'locked'; authBadge.className = 'badge badge-warn'
   passkeyAuthBtn.disabled = false
 }
+
 function showVault() {
-  setup.hidden = true; lock.hidden = true; vault.hidden = false
+  lock.hidden = true; vault.hidden = false
   authBadge.textContent = 'authed'; authBadge.className = 'badge badge-ok'
   renderSecrets(); renderPasskeys(); renderSshKeys()
 }
 
-// ── Lock screen — single button ────────────────────────────────────────
+// ── The button ─────────────────────────────────────────────────────────
 passkeyAuthBtn.addEventListener('click', async () => {
   passkeyAuthErr.hidden = true
-  if (!webauthnSupported()) {
+  if (!window.PublicKeyCredential || !navigator.credentials) {
     passkeyAuthErr.textContent = 'WebAuthn not supported in this browser.'
     passkeyAuthErr.hidden = false; return
   }
   try {
     const passphrase = await signInWithPasskey()
-    await unlockWithPassphrase(passphrase)
+    const pt = await aesDecrypt(state.doc.vault, passphrase)
+    state.secrets = JSON.parse(pt)
+    state.passphrase = passphrase
+    state.pat = state.secrets.GITHUB_PAT || null
+    showVault()
   } catch (e) {
+    if (e.name === 'NotAllowedError') return  // user cancelled — silent
     passkeyAuthErr.textContent = e.message || String(e)
     passkeyAuthErr.hidden = false
   }
 })
 
-lockPassphraseBtn?.addEventListener('click', async () => {
-  lockPassphraseErr.hidden = true
-  const passphrase = lockPassphrase.value
-  if (!passphrase) return
-  try {
-    await unlockWithPassphrase(passphrase)
-    lockPassphrase.value = ''
-  } catch {
-    lockPassphraseErr.textContent = 'Passphrase did not decrypt vault'
-    lockPassphraseErr.hidden = false
-  }
-})
-
-async function unlockWithPassphrase(passphrase) {
-  const pt = await aesDecrypt(state.doc.vault, passphrase)
-  state.secrets = JSON.parse(pt)
-  state.passphrase = passphrase
-  showVault()
-}
-
-// ── Secrets ────────────────────────────────────────────────────────────
+// ── Authed: secrets ────────────────────────────────────────────────────
 function renderSecrets() {
   const keys = Object.keys(state.secrets || {}).sort()
   if (!keys.length) {
@@ -371,8 +306,7 @@ newBtn.addEventListener('click', () => {
   state.currentEdit = null
   editTitle.textContent = 'New secret'
   editKey.value = ''; editValue.value = ''
-  editKey.disabled = false
-  editErr.hidden = true
+  editKey.disabled = false; editErr.hidden = true
   editDialog.showModal()
 })
 
@@ -386,8 +320,7 @@ editSave.addEventListener('click', async () => {
   if (key === 'GITHUB_PAT') state.pat = value
   try { await persistVault('add ' + key) }
   catch (e) { editErr.textContent = e.message; editErr.hidden = false; return }
-  editDialog.close()
-  renderSecrets()
+  editDialog.close(); renderSecrets()
 })
 
 copyBtn.addEventListener('click', () => {
@@ -400,8 +333,7 @@ deleteBtn.addEventListener('click', async () => {
   if (!confirm(`Delete ${state.currentView}? This cannot be undone.`)) return
   delete state.secrets[state.currentView]
   await persistVault('delete ' + state.currentView)
-  viewDialog.close()
-  renderSecrets()
+  viewDialog.close(); renderSecrets()
 })
 
 async function persistVault(message) {
@@ -410,7 +342,7 @@ async function persistVault(message) {
   await commitState(doc, `vault: ${message}`)
 }
 
-// ── Passkeys ───────────────────────────────────────────────────────────
+// ── Authed: passkeys ───────────────────────────────────────────────────
 function renderPasskeys() {
   const pks = state.doc?.passkeys || []
   if (!pks.length) {
@@ -432,26 +364,22 @@ function renderPasskeys() {
 }
 
 addPasskeyBtn.addEventListener('click', async () => {
-  if (!webauthnSupported()) { alert('WebAuthn not supported.'); return }
   const name = prompt('Name this passkey:', 'passkey')
   if (!name) return
   try {
     const reg = await registerPasskey(name)
     const wrapped = await rawAesEncrypt(state.passphrase, reg.prfOutput)
     state.doc = { ...(state.doc || { version: 1 }),
-      passkeys: [ ...(state.doc?.passkeys || []), {
+      passkeys: [...(state.doc?.passkeys || []), {
         credentialId: reg.credentialId, name: reg.name, alg: reg.alg,
-        prfSalt: reg.prfSalt, prf_wrapped_passphrase: wrapped,
-        createdAt: reg.createdAt,
+        prf_wrapped_passphrase: wrapped, createdAt: reg.createdAt,
       }] }
     await commitState(state.doc, `vault: register passkey "${name}"`)
     renderPasskeys()
-  } catch (e) {
-    alert('Passkey registration failed: ' + (e.message || e))
-  }
+  } catch (e) { alert('Passkey registration failed: ' + (e.message || e)) }
 })
 
-// ── SSH keys (CLI metadata) ────────────────────────────────────────────
+// ── Authed: ssh keys (CLI metadata) ────────────────────────────────────
 function renderSshKeys() {
   const keys = state.doc?.ssh_keys || []
   if (!keys.length) {
@@ -490,104 +418,30 @@ sshSave.addEventListener('click', async () => {
     fp = 'SHA256:' + bufToB64(hash).replace(/=+$/, '')
   } catch (e) { sshErr.textContent = 'malformed key: ' + e.message; sshErr.hidden = false; return }
   state.doc = { ...(state.doc || { version: 1 }),
-    ssh_keys: [ ...(state.doc?.ssh_keys || []), { name, type: 'ssh-ed25519', pubkey, fingerprint: fp, createdAt: new Date().toISOString() } ]
+    ssh_keys: [...(state.doc?.ssh_keys || []), { name, type: 'ssh-ed25519', pubkey, fingerprint: fp, createdAt: new Date().toISOString() }]
   }
   try { await commitState(state.doc, `vault: add ssh key "${name}"`) }
   catch (e) { sshErr.textContent = e.message; sshErr.hidden = false; return }
-  sshDialog.close()
-  renderSshKeys()
+  sshDialog.close(); renderSshKeys()
 })
 
-// ── New-user setup wizard (only shown if no vault.json exists yet) ─────
-setupPatNext?.addEventListener('click', async () => {
-  setupErr.hidden = true
-  const pat = setupPat.value.trim()
-  if (!pat) return
-  state.pat = pat
-  try {
-    const { remoteSha, doc } = await fetchState()
-    state.remoteSha = remoteSha
-    state.doc = doc
-    localStorage.setItem('vault.pat', pat)
-    setupPat.value = ''
-    step1.hidden = true; step2.hidden = false
-    setupPassphrase.focus()
-  } catch (e) {
-    state.pat = null
-    setupErr.textContent = `PAT validation failed: ${e.message}`
-    setupErr.hidden = false
-  }
-})
-
-setupPassNext?.addEventListener('click', async () => {
-  setupErr.hidden = true
-  const passphrase = setupPassphrase.value
-  if (passphrase.length < 16) {
-    setupErr.textContent = 'passphrase must be ≥16 chars'; setupErr.hidden = false; return
-  }
-  if (state.doc?.vault?.ct) {
-    // Existing vault — verify passphrase decrypts.
-    try {
-      const pt = await aesDecrypt(state.doc.vault, passphrase)
-      state.secrets = JSON.parse(pt)
-      state.passphrase = passphrase
-    } catch {
-      setupErr.textContent = 'passphrase did not decrypt the existing vault'; setupErr.hidden = false; return
-    }
-  } else {
-    // Fresh vault — initialise.
-    state.secrets = {}
-    state.passphrase = passphrase
-    const blob = await aesEncrypt(JSON.stringify(state.secrets), passphrase)
-    state.doc = { version: 1, vault: blob, passkeys: [], ssh_keys: [] }
-    try { await commitState(state.doc, 'vault: initial encryption') }
-    catch (e) { setupErr.textContent = e.message; setupErr.hidden = false; return }
-  }
-  setupPassphrase.value = ''
-  step2.hidden = true; step3.hidden = false
-  setupPasskeyName.focus()
-})
-
-setupPasskeyBtn?.addEventListener('click', async () => {
-  setupPasskeyErr.hidden = true
-  const name = setupPasskeyName.value.trim()
-  if (!name) { setupPasskeyErr.textContent = 'name required'; setupPasskeyErr.hidden = false; return }
-  try {
-    const reg = await registerPasskey(name)
-    const wrapped = await rawAesEncrypt(state.passphrase, reg.prfOutput)
-    state.doc = { ...state.doc, version: 1,
-      passkeys: [ ...(state.doc?.passkeys || []), {
-        credentialId: reg.credentialId, name: reg.name, alg: reg.alg,
-        prfSalt: reg.prfSalt, prf_wrapped_passphrase: wrapped, createdAt: reg.createdAt,
-      }] }
-    await commitState(state.doc, `vault: register passkey "${name}"`)
-    showVault()
-  } catch (e) {
-    setupPasskeyErr.textContent = e.message || String(e)
-    setupPasskeyErr.hidden = false
-  }
-})
-
-// ── Session controls ───────────────────────────────────────────────────
+// ── Session ────────────────────────────────────────────────────────────
 logoutBtn?.addEventListener('click', () => {
-  state.passphrase = null; state.secrets = null
+  state.passphrase = null; state.secrets = null; state.pat = null
   showLock()
 })
 
-rotatePatBtn?.addEventListener('click', () => {
-  const next = prompt('New GitHub PAT for this device (cached in localStorage):')
+rotatePatBtn?.addEventListener('click', async () => {
+  const next = prompt('New GitHub PAT (will replace GITHUB_PAT in the vault):')
   if (!next) return
-  localStorage.setItem('vault.pat', next.trim())
+  state.secrets.GITHUB_PAT = next.trim()
   state.pat = next.trim()
-  alert('PAT rotated. Reloading.')
-  location.reload()
+  try { await persistVault('rotate GITHUB_PAT'); alert('PAT rotated.') }
+  catch (e) { alert('Rotate failed: ' + e.message) }
 })
 
 // ── Utils ──────────────────────────────────────────────────────────────
 function esc(s) { return String(s).replace(/[&<>"']/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])) }
-function fmt(iso) {
-  if (!iso) return '—'
-  return new Date(iso).toISOString().slice(0, 16).replace('T', ' ')
-}
+function fmt(iso) { return iso ? new Date(iso).toISOString().slice(0, 16).replace('T', ' ') : '—' }
 
 init()
